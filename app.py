@@ -94,6 +94,7 @@ html, body, [class*="css"] { font-family:'Inter','Segoe UI',sans-serif; }
 .odds-card.total .win { color:#00e676; }
 .odds-card.total .sub { color:#93a0b0; font-size:.85rem; margin-top:.2rem; }
 h2, h3 { letter-spacing:-.3px; }
+.batnum { padding-top:6px; font-weight:800; color:#00e676; text-align:center; font-size:1.1rem; }
 </style>
 """
 
@@ -773,7 +774,9 @@ def main():
         st.stop()
     pa_df = add_recency_weights(pa_df, datetime.today())   # weight recent form higher
     league = compute_league_baselines(pa_df)
-    bullpens = compute_bullpen_profiles(pa_df, league)     # per-team relief quality
+    if "bullpens" not in st.session_state:                  # compute once per session (fast reruns)
+        st.session_state.bullpens = compute_bullpen_profiles(pa_df, league)
+    bullpens = st.session_state.bullpens
     st.success(f"🟢 Loaded {len(pa_df):,} plate appearances across {pa_df['batter'].nunique():,} batters.")
 
     # ----- Session state -----
@@ -873,20 +876,47 @@ def main():
             "Bats": [b["bats"] for b in cards["home_lineup"]],
         })
 
-    def _lineup_editor(df, roster, key):
-        """Data editor whose Player Name is a dropdown of the team's real roster,
-        so swapping a hitter loads the correct player automatically."""
-        names = sorted(set(roster) | set(df["Player Name"].dropna()))
-        cfg = {
-            "Order": st.column_config.NumberColumn("Order", help="Batting order — edit to reorder", width="small"),
-            "Player Name": st.column_config.SelectboxColumn("Player Name", options=names, width="large") if names
-                           else st.column_config.TextColumn("Player Name", width="large"),
-            "Bats": st.column_config.SelectboxColumn("Bats", options=["R", "L", "S"], width="small"),
-        }
-        return st.data_editor(df, use_container_width=True, num_rows="dynamic",
-                              hide_index=True, column_config=cfg, key=key)
+    def render_lineup(prefix, roster, default_df, gid):
+        """Batting order as 9 slots: each a roster dropdown + ⬆⬇ move arrows.
+        Reorder is instant; swaps are backed by session_state so state survives."""
+        n = len(default_df)
+        options = sorted(roster) if roster else list(default_df["Player Name"])
+        defaults = list(default_df["Player Name"])
+        # Initialise each slot once per game.
+        for i in range(n):
+            k = f"{prefix}_{gid}_{i}"
+            if k not in st.session_state:
+                st.session_state[k] = defaults[i] if i < len(defaults) else (options[0] if options else "")
+        # Apply a queued swap BEFORE the selectboxes are instantiated this run.
+        pend = st.session_state.pop(f"{prefix}_swap", None)
+        if pend:
+            a, b = f"{prefix}_{gid}_{pend[0]}", f"{prefix}_{gid}_{pend[1]}"
+            if a in st.session_state and b in st.session_state:
+                st.session_state[a], st.session_state[b] = st.session_state[b], st.session_state[a]
+        # Render the slots.
+        for i in range(n):
+            k = f"{prefix}_{gid}_{i}"
+            cur = st.session_state[k]
+            opts = list(options) if cur in options else [cur] + list(options)
+            c = st.columns([0.5, 6, 0.9, 0.9])
+            c[0].markdown(f"<div class='batnum'>{i+1}</div>", unsafe_allow_html=True)
+            c[1].selectbox("p", opts, key=k, label_visibility="collapsed")
+            if c[2].button("⬆", key=f"{k}_up", disabled=(i == 0), use_container_width=True):
+                st.session_state[f"{prefix}_swap"] = (i, i - 1); st.rerun()
+            if c[3].button("⬇", key=f"{k}_dn", disabled=(i == n - 1), use_container_width=True):
+                st.session_state[f"{prefix}_swap"] = (i, i + 1); st.rerun()
 
-    st.caption("✏️ Pick players from the **dropdown** (loads their real stats) · change **Order** to reorder · +/– to add/remove.")
+    def lineup_records(prefix, gid, n, roster):
+        recs = []
+        for i in range(n):
+            name = st.session_state.get(f"{prefix}_{gid}_{i}")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            info = roster.get(name.strip(), {})
+            recs.append({"name": name.strip(), "id": info.get("id"), "bats": info.get("bats", "R")})
+        return recs
+
+    st.caption("✏️ Pick a player from the dropdown · tap ⬆ / ⬇ to reorder the batting order instantly.")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -894,15 +924,13 @@ def main():
         st.session_state.away_p["name"] = st.text_input("Away SP", st.session_state.away_p["name"], key=f"ap_{chosen['id']}")
         st.session_state.away_p["throws"] = st.selectbox("Throws", ["R", "L"],
             index=0 if st.session_state.away_p["throws"] == "R" else 1, key=f"apt_{chosen['id']}")
-        st.session_state.away_df = _lineup_editor(
-            st.session_state.away_df, st.session_state.away_roster, f"aed_{chosen['id']}")
+        render_lineup("aord", st.session_state.away_roster, st.session_state.away_df, chosen['id'])
     with c2:
         st.markdown(f"### 🏠 {chosen['home_team_name']} (Home)")
         st.session_state.home_p["name"] = st.text_input("Home SP", st.session_state.home_p["name"], key=f"hp_{chosen['id']}")
         st.session_state.home_p["throws"] = st.selectbox("Throws", ["R", "L"],
             index=0 if st.session_state.home_p["throws"] == "R" else 1, key=f"hpt_{chosen['id']}")
-        st.session_state.home_df = _lineup_editor(
-            st.session_state.home_df, st.session_state.home_roster, f"hed_{chosen['id']}")
+        render_lineup("hord", st.session_state.home_roster, st.session_state.home_df, chosen['id'])
 
     # ----- Step 2: park & weather -----
     st.markdown("---")
@@ -928,31 +956,19 @@ def main():
     sim_count = st.select_slider("Monte Carlo games", options=[500, 1000, 2500, 5000], value=1000)
 
     with st.expander("💵 Enter sportsbook lines (optional) — to find betting value"):
-        v1, v2, v3 = st.columns(3)
+        st.markdown("**Moneyline**")
+        v1, v2 = st.columns(2)
         vegas_away_ml = v1.text_input(f"{chosen['away_team_name'].split()[-1]} moneyline", "", placeholder="e.g. +130")
         vegas_home_ml = v2.text_input(f"{chosen['home_team_name'].split()[-1]} moneyline", "", placeholder="e.g. -150")
-        vegas_total = v3.text_input("Total (O/U) line", "", placeholder="e.g. 8.5")
+        st.markdown("**Total (Over / Under)** — odds are usually not even, so enter both")
+        t1, t2, t3 = st.columns(3)
+        vegas_total = t1.text_input("Total line", "", placeholder="e.g. 8.5")
+        vegas_over_odds = t2.text_input("Over odds", "-110", placeholder="-110")
+        vegas_under_odds = t3.text_input("Under odds", "-110", placeholder="-110")
 
     if st.button("🔥 RUN PREDICTOR", type="primary"):
-        def df_to_records(df, roster):
-            """Build sim records, resolving each player's real id + handedness from
-            the team roster (so a swapped-in player uses HIS stats, not the old row)."""
-            df = df.copy()
-            if "Order" in df.columns:
-                df = df.sort_values("Order", na_position="last")
-            recs = []
-            for _, row in df.iterrows():
-                name = row.get("Player Name")
-                if not isinstance(name, str) or not name.strip():
-                    continue                                   # skip blank/added-empty rows
-                name = name.strip()
-                info = roster.get(name, {})
-                bats = row.get("Bats") if row.get("Bats") in ("R", "L", "S") else info.get("bats", "R")
-                recs.append({"name": name, "id": info.get("id"), "bats": bats})
-            return recs
-
-        away_recs = df_to_records(st.session_state.away_df, st.session_state.away_roster)
-        home_recs = df_to_records(st.session_state.home_df, st.session_state.home_roster)
+        away_recs = lineup_records("aord", chosen['id'], len(st.session_state.away_df), st.session_state.away_roster)
+        home_recs = lineup_records("hord", chosen['id'], len(st.session_state.home_df), st.session_state.home_roster)
 
         away_abbr = TEAM_NAME_TO_ABBR.get(chosen["away_team_name"])
         home_abbr = TEAM_NAME_TO_ABBR.get(chosen["home_team_name"])
@@ -1014,13 +1030,25 @@ def main():
                 totals = np.array(betting['raw_totals'])
                 p_over = float(np.mean(totals > total_line))
                 p_under = float(np.mean(totals < total_line))
-                # Pick follows the PROBABILITY, not the (skew-inflated) mean.
-                pick, pprob = ("OVER", p_over) if p_over >= p_under else ("UNDER", p_under)
-                cols[i].metric(f"O/U {total_line}", pick,
-                               help=f"Model avg total {betting['avg_total_runs']:.2f} · "
-                                    f"P(over) {p_over*100:.0f}% / P(under) {p_under*100:.0f}%")
-                edge_note = "🟢 edge" if pprob > 0.524 else "🟡 lean"  # 52.4% = breakeven at -110
-                cols[i].caption(f"P({pick.lower()}) ≈ {pprob*100:.0f}%  ·  {edge_note}")
+                over_imp = moneyline_to_prob(vegas_over_odds)
+                under_imp = moneyline_to_prob(vegas_under_odds)
+                # Value on each side = model prob minus that side's book-implied prob.
+                sides = []
+                if over_imp is not None:
+                    sides.append(("OVER", vegas_over_odds, p_over, p_over - over_imp))
+                if under_imp is not None:
+                    sides.append(("UNDER", vegas_under_odds, p_under, p_under - under_imp))
+                if sides:
+                    label, odds, prob, edge = max(sides, key=lambda s: s[3])  # best edge
+                    verdict = "🟢 VALUE" if edge > 0 else "🔴 no edge"
+                    cols[i].metric(f"O/U {total_line} → {label} {odds}", f"{edge*100:+.1f}%",
+                                   help=f"Model P({label.lower()}) {prob*100:.0f}% vs book-implied {(prob-edge)*100:.0f}%")
+                    cols[i].caption(verdict)
+                else:
+                    pick, pprob = ("OVER", p_over) if p_over >= p_under else ("UNDER", p_under)
+                    cols[i].metric(f"O/U {total_line}", pick,
+                                   help=f"Model avg total {betting['avg_total_runs']:.2f}")
+                    cols[i].caption(f"P({pick.lower()}) ≈ {pprob*100:.0f}%")
 
         st.markdown("### 📈 Total-Runs Distribution")
         counts = pd.Series(betting["raw_totals"]).value_counts()
