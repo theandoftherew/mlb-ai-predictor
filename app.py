@@ -411,6 +411,27 @@ def get_weather(game_id):
         return default
 
 
+def get_team_roster(team_id):
+    """Full active roster for a team: {full_name: {id, bats, is_pitcher}}. Used to
+    populate the lineup dropdowns so swapping a hitter loads the RIGHT player's
+    stats + handedness automatically."""
+    try:
+        url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster?rosterType=active"
+        roster = requests.get(url, timeout=15).json()["roster"]
+        hand = get_handedness([p["person"]["id"] for p in roster])
+        out = {}
+        for p in roster:
+            pid = p["person"]["id"]
+            out[p["person"]["fullName"]] = {
+                "id": pid,
+                "bats": hand.get(pid, {}).get("bats", "R"),
+                "is_pitcher": p["position"]["type"] == "Pitcher",
+            }
+        return out
+    except Exception:
+        return {}
+
+
 # =====================================================================
 # 3. MATCHUP MATH + ENVIRONMENT ADJUSTMENTS
 # =====================================================================
@@ -761,7 +782,6 @@ def main():
             "Order": range(1, 10),
             "Player Name": [f"{side} Batter {i}" for i in range(1, 10)],
             "Bats": ["R"] * 9,
-            "MLB_ID": [None] * 9,
         })
 
     if "current_game_id" not in st.session_state:
@@ -770,6 +790,8 @@ def main():
         st.session_state.home_p = {"name": "Home Pitcher", "id": None, "throws": "R"}
         st.session_state.away_df = _blank_lineup("Away")
         st.session_state.home_df = _blank_lineup("Home")
+        st.session_state.away_roster = {}
+        st.session_state.home_roster = {}
         st.session_state.weather = {"temp": 70, "wind_mph": 5, "wind_dir": "Neutral"}
 
     # ----- Step 1: schedule & lineups -----
@@ -830,33 +852,41 @@ def main():
     game_map = {g["label"]: g for g in games}
     chosen = game_map[st.selectbox("Matchup", list(game_map.keys()))]
 
-    # Load lineups + weather when the selected game changes.
+    # Load lineups, rosters + weather when the selected game changes.
     if st.session_state.current_game_id != chosen["id"]:
         st.session_state.current_game_id = chosen["id"]
-        with st.spinner("Fetching lineups, handedness & weather..."):
+        with st.spinner("Fetching lineups, rosters, handedness & weather..."):
             cards = get_game_lineups(chosen)
             st.session_state.weather = get_weather(chosen["id"])
+            st.session_state.away_roster = get_team_roster(chosen["away_team_id"])
+            st.session_state.home_roster = get_team_roster(chosen["home_team_id"])
         st.session_state.away_p = cards["away_pitcher"]
         st.session_state.home_p = cards["home_pitcher"]
         st.session_state.away_df = pd.DataFrame({
             "Order": range(1, 10),
             "Player Name": [b["name"] for b in cards["away_lineup"]],
             "Bats": [b["bats"] for b in cards["away_lineup"]],
-            "MLB_ID": [b["id"] for b in cards["away_lineup"]],
         })
         st.session_state.home_df = pd.DataFrame({
             "Order": range(1, 10),
             "Player Name": [b["name"] for b in cards["home_lineup"]],
             "Bats": [b["bats"] for b in cards["home_lineup"]],
-            "MLB_ID": [b["id"] for b in cards["home_lineup"]],
         })
 
-    editor_cfg = {
-        "Order": st.column_config.NumberColumn("Order", help="Batting order — edit to reorder", width="small"),
-        "Bats": st.column_config.SelectboxColumn("Bats", options=["R", "L", "S"], width="small"),
-        "MLB_ID": st.column_config.NumberColumn("MLB_ID", help="Statcast join key — leave as-is", disabled=True),
-    }
-    st.caption("✏️ Edit names & handedness · change **Order** to reorder · use +/– to add or remove batters.")
+    def _lineup_editor(df, roster, key):
+        """Data editor whose Player Name is a dropdown of the team's real roster,
+        so swapping a hitter loads the correct player automatically."""
+        names = sorted(set(roster) | set(df["Player Name"].dropna()))
+        cfg = {
+            "Order": st.column_config.NumberColumn("Order", help="Batting order — edit to reorder", width="small"),
+            "Player Name": st.column_config.SelectboxColumn("Player Name", options=names, width="large") if names
+                           else st.column_config.TextColumn("Player Name", width="large"),
+            "Bats": st.column_config.SelectboxColumn("Bats", options=["R", "L", "S"], width="small"),
+        }
+        return st.data_editor(df, use_container_width=True, num_rows="dynamic",
+                              hide_index=True, column_config=cfg, key=key)
+
+    st.caption("✏️ Pick players from the **dropdown** (loads their real stats) · change **Order** to reorder · +/– to add/remove.")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -864,15 +894,15 @@ def main():
         st.session_state.away_p["name"] = st.text_input("Away SP", st.session_state.away_p["name"], key=f"ap_{chosen['id']}")
         st.session_state.away_p["throws"] = st.selectbox("Throws", ["R", "L"],
             index=0 if st.session_state.away_p["throws"] == "R" else 1, key=f"apt_{chosen['id']}")
-        st.session_state.away_df = st.data_editor(st.session_state.away_df, use_container_width=True,
-            num_rows="dynamic", hide_index=True, column_config=editor_cfg, key=f"aed_{chosen['id']}")
+        st.session_state.away_df = _lineup_editor(
+            st.session_state.away_df, st.session_state.away_roster, f"aed_{chosen['id']}")
     with c2:
         st.markdown(f"### 🏠 {chosen['home_team_name']} (Home)")
         st.session_state.home_p["name"] = st.text_input("Home SP", st.session_state.home_p["name"], key=f"hp_{chosen['id']}")
         st.session_state.home_p["throws"] = st.selectbox("Throws", ["R", "L"],
             index=0 if st.session_state.home_p["throws"] == "R" else 1, key=f"hpt_{chosen['id']}")
-        st.session_state.home_df = st.data_editor(st.session_state.home_df, use_container_width=True,
-            num_rows="dynamic", hide_index=True, column_config=editor_cfg, key=f"hed_{chosen['id']}")
+        st.session_state.home_df = _lineup_editor(
+            st.session_state.home_df, st.session_state.home_roster, f"hed_{chosen['id']}")
 
     # ----- Step 2: park & weather -----
     st.markdown("---")
@@ -904,7 +934,9 @@ def main():
         vegas_total = v3.text_input("Total (O/U) line", "", placeholder="e.g. 8.5")
 
     if st.button("🔥 RUN PREDICTOR", type="primary"):
-        def df_to_records(df):
+        def df_to_records(df, roster):
+            """Build sim records, resolving each player's real id + handedness from
+            the team roster (so a swapped-in player uses HIS stats, not the old row)."""
             df = df.copy()
             if "Order" in df.columns:
                 df = df.sort_values("Order", na_position="last")
@@ -913,14 +945,14 @@ def main():
                 name = row.get("Player Name")
                 if not isinstance(name, str) or not name.strip():
                     continue                                   # skip blank/added-empty rows
-                mid = row.get("MLB_ID")
-                mid = int(mid) if pd.notna(mid) else None
-                bats = row.get("Bats") if row.get("Bats") in ("R", "L", "S") else "R"
-                recs.append({"name": name.strip(), "id": mid, "bats": bats})
+                name = name.strip()
+                info = roster.get(name, {})
+                bats = row.get("Bats") if row.get("Bats") in ("R", "L", "S") else info.get("bats", "R")
+                recs.append({"name": name, "id": info.get("id"), "bats": bats})
             return recs
 
-        away_recs = df_to_records(st.session_state.away_df)
-        home_recs = df_to_records(st.session_state.home_df)
+        away_recs = df_to_records(st.session_state.away_df, st.session_state.away_roster)
+        home_recs = df_to_records(st.session_state.home_df, st.session_state.home_roster)
 
         away_abbr = TEAM_NAME_TO_ABBR.get(chosen["away_team_name"])
         home_abbr = TEAM_NAME_TO_ABBR.get(chosen["home_team_name"])
@@ -979,11 +1011,16 @@ def main():
                 cols[i].caption(verdict)
                 i += 1
             if total_line is not None:
-                p_over = float(np.mean(np.array(betting['raw_totals']) > total_line))
-                pick = "OVER" if betting['avg_total_runs'] > total_line else "UNDER"
+                totals = np.array(betting['raw_totals'])
+                p_over = float(np.mean(totals > total_line))
+                p_under = float(np.mean(totals < total_line))
+                # Pick follows the PROBABILITY, not the (skew-inflated) mean.
+                pick, pprob = ("OVER", p_over) if p_over >= p_under else ("UNDER", p_under)
                 cols[i].metric(f"O/U {total_line}", pick,
-                               help=f"Model projects {betting['avg_total_runs']:.2f} total runs")
-                cols[i].caption(f"P(over) ≈ {p_over*100:.0f}%")
+                               help=f"Model avg total {betting['avg_total_runs']:.2f} · "
+                                    f"P(over) {p_over*100:.0f}% / P(under) {p_under*100:.0f}%")
+                edge_note = "🟢 edge" if pprob > 0.524 else "🟡 lean"  # 52.4% = breakeven at -110
+                cols[i].caption(f"P({pick.lower()}) ≈ {pprob*100:.0f}%  ·  {edge_note}")
 
         st.markdown("### 📈 Total-Runs Distribution")
         counts = pd.Series(betting["raw_totals"]).value_counts()
