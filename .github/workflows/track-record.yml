@@ -1,0 +1,35 @@
+name: Update model track record
+
+# Runs daily: grades finished games, then logs today's slate, and commits the
+# updated predictions.csv back to the repo so the app always shows a live record.
+on:
+  schedule:
+    - cron: "0 13 * * *"   # 13:00 UTC daily (before most first pitches)
+  workflow_dispatch: {}      # allow manual runs from the Actions tab
+
+permissions:
+  contents: write            # needed to commit predictions.csv
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Grade finished games + log today's slate
+        run: python3 track_record.py daily
+
+      - name: Commit updated log
+        run: |
+          git config user.name "track-record-bot"
+          git config user.email "actions@github.com"
+          git add predictions.csv
+          git diff --staged --quiet || git commit -m "Update track record ($(date -u +%Y-%m-%d))"
+          git push

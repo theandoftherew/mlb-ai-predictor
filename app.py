@@ -16,6 +16,10 @@ import altair as alt
 # 0. STATIC REFERENCE DATA
 # =====================================================================
 
+# Bump this whenever the model's math/weights change, so the performance log can
+# compare versions on their real, realized results.
+MODEL_VERSION = "v1.0-recency150-bullpen"
+
 # Which "events" values count as hits, and which do NOT count as at-bats.
 HIT_EVENTS = ['single', 'double', 'triple', 'home_run']
 NON_AB_EVENTS = ['walk', 'intent_walk', 'hit_by_pitch', 'sac_fly',
@@ -785,6 +789,70 @@ load_data = st.cache_data(_load_data)
 compute_league_baselines = st.cache_data(_compute_league_baselines)
 
 
+@st.cache_data(ttl=900)
+def load_track_record():
+    """Read the running performance log (settled predictions only)."""
+    try:
+        df = pd.read_csv("predictions.csv")
+        return df[df["status"] == "settled"].copy()
+    except Exception:
+        return None
+
+
+def render_track_record():
+    """Live model-performance dashboard, read from predictions.csv."""
+    tr = load_track_record()
+    if tr is None or len(tr) < 10:
+        return
+    acc, brier, mae = tr["correct"].mean(), tr["brier"].mean(), tr["total_abs_err"].mean()
+    with st.expander(f"📈 Live Track Record — {len(tr):,} games graded · {acc*100:.1f}% winners picked"):
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Games graded", f"{len(tr):,}")
+        m2.metric("Winner accuracy", f"{acc*100:.1f}%")
+        m3.metric("Brier score", f"{brier:.3f}", help="lower is better; a coin-flip = 0.250")
+        m4.metric("Total-runs MAE", f"{mae:.2f}")
+
+        trs = tr.sort_values("pred_date").reset_index(drop=True)
+        trs["game_no"] = range(1, len(trs) + 1)
+        trs["cum_acc"] = trs["correct"].expanding().mean() * 100
+        st.markdown("**Cumulative winner accuracy** (settles as more games are graded)")
+        st.altair_chart(
+            alt.Chart(trs).mark_line(color="#00e676").encode(
+                x=alt.X("game_no:Q", title="games graded"),
+                y=alt.Y("cum_acc:Q", title="accuracy %", scale=alt.Scale(domain=[35, 65])),
+                tooltip=["game_no", alt.Tooltip("cum_acc:Q", format=".1f")],
+            ).properties(height=220), use_container_width=True)
+
+        trs["bucket"] = pd.cut(trs["pred_home_win_pct"], [0, .35, .45, .55, .65, 1.01],
+                               labels=["<35%", "35-45%", "45-55%", "55-65%", ">65%"])
+        cal = (trs.groupby("bucket", observed=True)
+               .agg(pred=("pred_home_win_pct", "mean"), actual=("home_won", "mean"),
+                    n=("home_won", "size")).reset_index().dropna())
+        if len(cal):
+            cal["pred"] *= 100; cal["actual"] *= 100
+            st.markdown("**Calibration** — dots near the dashed line = honest probabilities")
+            diag = alt.Chart(pd.DataFrame({"x": [0, 100], "y": [0, 100]})).mark_line(
+                strokeDash=[4, 4], color="#5a6472").encode(x="x:Q", y="y:Q")
+            pts = alt.Chart(cal).mark_circle(color="#00e676").encode(
+                x=alt.X("pred:Q", title="predicted home win %", scale=alt.Scale(domain=[0, 100])),
+                y=alt.Y("actual:Q", title="actual home win %", scale=alt.Scale(domain=[0, 100])),
+                size=alt.Size("n:Q", legend=None, scale=alt.Scale(range=[80, 500])),
+                tooltip=["bucket", alt.Tooltip("pred:Q", format=".0f"),
+                         alt.Tooltip("actual:Q", format=".0f"), "n"])
+            st.altair_chart((diag + pts).properties(height=260), use_container_width=True)
+
+        if tr["model_version"].nunique() > 1:
+            st.markdown("**By model version** — compare weightings on real results")
+            vv = (tr.groupby("model_version")
+                  .agg(games=("correct", "size"), accuracy=("correct", "mean"),
+                       brier=("brier", "mean")).reset_index())
+            vv["accuracy"] = (vv["accuracy"] * 100).round(1)
+            vv["brier"] = vv["brier"].round(3)
+            st.table(vv.set_index("model_version"))
+        st.caption(f"Walk-forward + live predictions graded against final scores. "
+                   f"Auto-updates daily. Current model: `{MODEL_VERSION}`.")
+
+
 # =====================================================================
 # 6. STREAMLIT APP (only runs via `streamlit run app.py`)
 # =====================================================================
@@ -834,6 +902,8 @@ when it says 60%, that side wins about 60% of the time.
 
 *Data snapshot through {data_through_str}. Not affiliated with MLB.*
 """)
+
+    render_track_record()
 
     # ----- Session state -----
     def _blank_lineup(side):
