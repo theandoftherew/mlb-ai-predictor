@@ -478,6 +478,32 @@ def moneyline_to_prob(ml):
     return (-ml) / (-ml + 100) if ml < 0 else 100.0 / (ml + 100)
 
 
+def odds_to_prob(value, fmt="American"):
+    """Parse either American (+130, -150) or Decimal (2.30, 1.67) odds into an
+    implied probability. Returns None if blank/invalid."""
+    s = str(value).strip().replace("+", "")
+    if not s:
+        return None
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    if fmt == "Decimal":
+        return 1.0 / v if v > 1.0 else None
+    if v == 0:
+        return None
+    return (-v) / (-v + 100) if v < 0 else 100.0 / (v + 100)
+
+
+def prob_to_odds(prob, fmt="American"):
+    """Model probability -> displayed fair odds in the chosen format."""
+    if prob <= 0:
+        return "—"
+    if fmt == "Decimal":
+        return f"{1.0 / prob:.2f}"
+    return convert_prob_to_moneyline(prob)
+
+
 def poisson_sf(k, mean):
     """P(X > k) for a Poisson(mean) — used to price over/under prop lines.
     E.g. P(over 6.5 Ks) = poisson_sf(6, expected_Ks)."""
@@ -743,6 +769,9 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
         "away_exp_runs": float(np.mean(away_runs_list)),
         "home_exp_runs": float(np.mean(home_runs_list)),
         "raw_totals": tot_runs,
+        # Per-sim margin from the AWAY team's view (away_runs - home_runs). Used to
+        # price the run line: away covers -1.5 when margin >= 2, etc.
+        "raw_margins": [a - h for a, h in zip(away_runs_list, home_runs_list)],
     }
     return hitters, pitchers, betting
 
@@ -982,16 +1011,30 @@ when it says 60%, that side wins about 60% of the time.
     st.subheader("⚡ Step 3: Run the Simulation")
     sim_count = st.select_slider("Monte Carlo games", options=[500, 1000, 2500, 5000], value=1000)
 
+    away_short = chosen['away_team_name'].split()[-1]
+    home_short = chosen['home_team_name'].split()[-1]
     with st.expander("💵 Enter sportsbook lines (optional) — to find betting value"):
+        odds_fmt = st.radio("Odds format", ["American", "Decimal"], horizontal=True,
+                            help="American: +130 / -150 · Decimal: 2.30 / 1.67")
+        ml_ph = "e.g. 2.30" if odds_fmt == "Decimal" else "e.g. +130"
+        juice_ph = "1.91" if odds_fmt == "Decimal" else "-110"
+
         st.markdown("**Moneyline**")
         v1, v2 = st.columns(2)
-        vegas_away_ml = v1.text_input(f"{chosen['away_team_name'].split()[-1]} moneyline", "", placeholder="e.g. +130")
-        vegas_home_ml = v2.text_input(f"{chosen['home_team_name'].split()[-1]} moneyline", "", placeholder="e.g. -150")
+        vegas_away_ml = v1.text_input(f"{away_short} moneyline", "", placeholder=ml_ph)
+        vegas_home_ml = v2.text_input(f"{home_short} moneyline", "", placeholder=ml_ph)
+
         st.markdown("**Total (Over / Under)** — odds are usually not even, so enter both")
         t1, t2, t3 = st.columns(3)
         vegas_total = t1.text_input("Total line", "", placeholder="e.g. 8.5")
-        vegas_over_odds = t2.text_input("Over odds", "-110", placeholder="-110")
-        vegas_under_odds = t3.text_input("Under odds", "-110", placeholder="-110")
+        vegas_over_odds = t2.text_input("Over odds", "", placeholder=juice_ph)
+        vegas_under_odds = t3.text_input("Under odds", "", placeholder=juice_ph)
+
+        st.markdown("**Run line (spread)** — e.g. Royals **-1.5** (win by 2+) or **+1.5** (lose by ≤1)")
+        r1, r2, r3 = st.columns(3)
+        rl_team = r1.selectbox("Team", [away_short, home_short])
+        rl_line = r2.text_input("Run line", "-1.5", placeholder="-1.5")
+        rl_odds = r3.text_input("Run-line odds", "", placeholder=ml_ph)
 
     if st.button("🔥 RUN PREDICTOR", type="primary"):
         away_recs = lineup_records("aord", chosen['id'], len(st.session_state.away_df), st.session_state.away_roster)
@@ -1025,8 +1068,8 @@ when it says 60%, that side wins about 60% of the time.
         st.balloons()
 
         st.markdown("## 💰 Betting & Market Metrics")
-        away_ml = convert_prob_to_moneyline(betting['away_win_pct'])
-        home_ml = convert_prob_to_moneyline(betting['home_win_pct'])
+        away_ml = prob_to_odds(betting['away_win_pct'], odds_fmt)
+        home_ml = prob_to_odds(betting['home_win_pct'], odds_fmt)
         st.markdown(f"""
         <div class="odds-wrap">
           <div class="odds-card">
@@ -1049,51 +1092,55 @@ when it says 60%, that side wins about 60% of the time.
         """, unsafe_allow_html=True)
 
         # ---- Value / edge finder (only if user entered book lines) ----
-        edges = []
+        # Each entry: (title, model_prob, book_implied_prob).
+        value_bets = []
+
+        # Moneyline (each team)
         for mprob, vml, tm in [
-            (betting['away_win_pct'], vegas_away_ml, chosen['away_team_name'].split()[-1]),
-            (betting['home_win_pct'], vegas_home_ml, chosen['home_team_name'].split()[-1])]:
-            vp = moneyline_to_prob(vml)
+            (betting['away_win_pct'], vegas_away_ml, away_short),
+            (betting['home_win_pct'], vegas_home_ml, home_short)]:
+            vp = odds_to_prob(vml, odds_fmt)
             if vp is not None:
-                edges.append((tm, mprob, vp, mprob - vp, vml))
+                value_bets.append((f"{tm} ML {vml}", mprob, vp))
+
+        # Total (best of over/under vs their own odds)
         try:
             total_line = float(vegas_total)
         except (TypeError, ValueError):
             total_line = None
+        if total_line is not None:
+            totals = np.array(betting['raw_totals'])
+            p_over = float(np.mean(totals > total_line))
+            p_under = float(np.mean(totals < total_line))
+            oi, ui = odds_to_prob(vegas_over_odds, odds_fmt), odds_to_prob(vegas_under_odds, odds_fmt)
+            tsides = []
+            if oi is not None: tsides.append((f"Over {total_line} ({vegas_over_odds})", p_over, oi))
+            if ui is not None: tsides.append((f"Under {total_line} ({vegas_under_odds})", p_under, ui))
+            if tsides:
+                value_bets.append(max(tsides, key=lambda s: s[1] - s[2]))
 
-        if edges or total_line is not None:
+        # Run line (spread)
+        try:
+            rl = float(rl_line)
+            rl_imp = odds_to_prob(rl_odds, odds_fmt)
+        except (TypeError, ValueError):
+            rl, rl_imp = None, None
+        if rl is not None and rl_imp is not None:
+            margins = np.array(betting['raw_margins'])              # away - home per sim
+            team_margin = margins if rl_team == away_short else -margins
+            p_cover = float(np.mean(team_margin > -rl))             # covers when margin + line > 0
+            value_bets.append((f"{rl_team} {rl:+g} ({rl_odds})", p_cover, rl_imp))
+
+        if value_bets:
             st.markdown("### 💵 Value vs. the Book")
-            cols = st.columns(len(edges) + (1 if total_line is not None else 0))
-            i = 0
-            for tm, mprob, vp, edge, vml in edges:
+            st.caption("Green = the model's probability beats the book's implied odds (positive expected value).")
+            cols = st.columns(len(value_bets))
+            for j, (title, mprob, imp) in enumerate(value_bets):
+                edge = mprob - imp
                 verdict = "🟢 VALUE" if edge > 0.02 else ("🟡 slight edge" if edge > 0 else "🔴 no edge")
-                cols[i].metric(f"{tm} ML {vml}", f"{edge*100:+.1f}%",
-                               help=f"Model {mprob*100:.1f}% vs book-implied {vp*100:.1f}%")
-                cols[i].caption(verdict)
-                i += 1
-            if total_line is not None:
-                totals = np.array(betting['raw_totals'])
-                p_over = float(np.mean(totals > total_line))
-                p_under = float(np.mean(totals < total_line))
-                over_imp = moneyline_to_prob(vegas_over_odds)
-                under_imp = moneyline_to_prob(vegas_under_odds)
-                # Value on each side = model prob minus that side's book-implied prob.
-                sides = []
-                if over_imp is not None:
-                    sides.append(("OVER", vegas_over_odds, p_over, p_over - over_imp))
-                if under_imp is not None:
-                    sides.append(("UNDER", vegas_under_odds, p_under, p_under - under_imp))
-                if sides:
-                    label, odds, prob, edge = max(sides, key=lambda s: s[3])  # best edge
-                    verdict = "🟢 VALUE" if edge > 0 else "🔴 no edge"
-                    cols[i].metric(f"O/U {total_line} → {label} {odds}", f"{edge*100:+.1f}%",
-                                   help=f"Model P({label.lower()}) {prob*100:.0f}% vs book-implied {(prob-edge)*100:.0f}%")
-                    cols[i].caption(verdict)
-                else:
-                    pick, pprob = ("OVER", p_over) if p_over >= p_under else ("UNDER", p_under)
-                    cols[i].metric(f"O/U {total_line}", pick,
-                                   help=f"Model avg total {betting['avg_total_runs']:.2f}")
-                    cols[i].caption(f"P({pick.lower()}) ≈ {pprob*100:.0f}%")
+                cols[j].metric(title, f"{edge*100:+.1f}%",
+                               help=f"Model {mprob*100:.0f}% vs book-implied {imp*100:.0f}%")
+                cols[j].caption(verdict)
 
         st.markdown("### 📈 Total-Runs Distribution")
         counts = pd.Series(betting["raw_totals"]).value_counts()
