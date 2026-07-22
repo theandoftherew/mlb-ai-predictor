@@ -445,6 +445,38 @@ def convert_prob_to_moneyline(prob):
     return f"+{int(round(((1 - prob) / prob) * 100))}"
 
 
+def moneyline_to_prob(ml):
+    """American moneyline -> implied win probability (includes the book's vig)."""
+    try:
+        ml = float(ml)
+    except (TypeError, ValueError):
+        return None
+    if ml == 0:
+        return None
+    return (-ml) / (-ml + 100) if ml < 0 else 100.0 / (ml + 100)
+
+
+def poisson_sf(k, mean):
+    """P(X > k) for a Poisson(mean) — used to price over/under prop lines.
+    E.g. P(over 6.5 Ks) = poisson_sf(6, expected_Ks)."""
+    if mean <= 0:
+        return 0.0
+    import math
+    cdf = 0.0
+    term = math.exp(-mean)   # P(X = 0)
+    cdf += term
+    for i in range(1, int(k) + 1):
+        term *= mean / i
+        cdf += term
+    return max(0.0, min(1.0, 1.0 - cdf))
+
+
+def prob_at_least_one(mean):
+    """P(X >= 1) for a Poisson(mean) — e.g. probability of 'hits a HR'."""
+    import math
+    return 1.0 - math.exp(-mean) if mean > 0 else 0.0
+
+
 # =====================================================================
 # 4. SIMULATION ENGINE
 # =====================================================================
@@ -756,6 +788,45 @@ def main():
             "away_pitcher_id": None, "home_pitcher_id": None,
         }]
 
+    # ----- Full-slate predictions (all games on this date) -----
+    with st.expander(f"🗓️ Full-Slate Predictions — simulate every game on {selected_date.strftime('%b %d')}"):
+        st.caption("Runs a quick simulation on every scheduled game and ranks them by confidence. Takes ~1 min.")
+        if st.button("⚡ Predict entire slate", key="slate_btn"):
+            prog = st.progress(0.0, text="Simulating slate...")
+            slate_rows = []
+            for gi, g in enumerate(games):
+                try:
+                    cards = get_game_lineups(g)
+                    aabbr = TEAM_NAME_TO_ABBR.get(g["away_team_name"])
+                    habbr = TEAM_NAME_TO_ABBR.get(g["home_team_name"])
+                    _, _, bet = simulate_games(
+                        cards["away_lineup"], cards["home_lineup"],
+                        cards["away_pitcher"], cards["home_pitcher"],
+                        PARK_FACTORS.get(g["home_team_name"], NEUTRAL_PARK),
+                        {"temp": 70, "wind_mph": 5, "wind_dir": "Neutral"},
+                        league, pa_df, simulations=400,
+                        away_bullpen=bullpens.get(aabbr), home_bullpen=bullpens.get(habbr))
+                    fav = (g["away_team_name"] if bet["away_win_pct"] > bet["home_win_pct"]
+                           else g["home_team_name"])
+                    slate_rows.append({
+                        "Matchup": g["label"],
+                        "Away Win %": round(bet["away_win_pct"] * 100, 1),
+                        "Home Win %": round(bet["home_win_pct"] * 100, 1),
+                        "Proj Total": round(bet["avg_total_runs"], 1),
+                        "Favorite": fav.split()[-1],
+                        "Conf %": round(max(bet["away_win_pct"], bet["home_win_pct"]) * 100, 1),
+                    })
+                except Exception:
+                    pass
+                prog.progress((gi + 1) / len(games), text=f"Simulated {gi+1}/{len(games)} games")
+            prog.empty()
+            if slate_rows:
+                slate_df = (pd.DataFrame(slate_rows)
+                            .sort_values("Conf %", ascending=False).set_index("Matchup"))
+                st.dataframe(slate_df, use_container_width=True)
+            else:
+                st.info("Couldn't simulate the slate — lineups may not be posted yet for this date.")
+
     game_map = {g["label"]: g for g in games}
     chosen = game_map[st.selectbox("Matchup", list(game_map.keys()))]
 
@@ -781,9 +852,11 @@ def main():
         })
 
     editor_cfg = {
+        "Order": st.column_config.NumberColumn("Order", help="Batting order — edit to reorder", width="small"),
         "Bats": st.column_config.SelectboxColumn("Bats", options=["R", "L", "S"], width="small"),
         "MLB_ID": st.column_config.NumberColumn("MLB_ID", help="Statcast join key — leave as-is", disabled=True),
     }
+    st.caption("✏️ Edit names & handedness · change **Order** to reorder · use +/– to add or remove batters.")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -792,14 +865,14 @@ def main():
         st.session_state.away_p["throws"] = st.selectbox("Throws", ["R", "L"],
             index=0 if st.session_state.away_p["throws"] == "R" else 1, key=f"apt_{chosen['id']}")
         st.session_state.away_df = st.data_editor(st.session_state.away_df, use_container_width=True,
-            num_rows="fixed", hide_index=True, column_config=editor_cfg, key=f"aed_{chosen['id']}")
+            num_rows="dynamic", hide_index=True, column_config=editor_cfg, key=f"aed_{chosen['id']}")
     with c2:
         st.markdown(f"### 🏠 {chosen['home_team_name']} (Home)")
         st.session_state.home_p["name"] = st.text_input("Home SP", st.session_state.home_p["name"], key=f"hp_{chosen['id']}")
         st.session_state.home_p["throws"] = st.selectbox("Throws", ["R", "L"],
             index=0 if st.session_state.home_p["throws"] == "R" else 1, key=f"hpt_{chosen['id']}")
         st.session_state.home_df = st.data_editor(st.session_state.home_df, use_container_width=True,
-            num_rows="fixed", hide_index=True, column_config=editor_cfg, key=f"hed_{chosen['id']}")
+            num_rows="dynamic", hide_index=True, column_config=editor_cfg, key=f"hed_{chosen['id']}")
 
     # ----- Step 2: park & weather -----
     st.markdown("---")
@@ -824,13 +897,26 @@ def main():
     st.subheader("⚡ Step 3: Run the Simulation")
     sim_count = st.select_slider("Monte Carlo games", options=[500, 1000, 2500, 5000], value=1000)
 
+    with st.expander("💵 Enter sportsbook lines (optional) — to find betting value"):
+        v1, v2, v3 = st.columns(3)
+        vegas_away_ml = v1.text_input(f"{chosen['away_team_name'].split()[-1]} moneyline", "", placeholder="e.g. +130")
+        vegas_home_ml = v2.text_input(f"{chosen['home_team_name'].split()[-1]} moneyline", "", placeholder="e.g. -150")
+        vegas_total = v3.text_input("Total (O/U) line", "", placeholder="e.g. 8.5")
+
     if st.button("🔥 RUN PREDICTOR", type="primary"):
         def df_to_records(df):
+            df = df.copy()
+            if "Order" in df.columns:
+                df = df.sort_values("Order", na_position="last")
             recs = []
             for _, row in df.iterrows():
-                mid = row["MLB_ID"]
+                name = row.get("Player Name")
+                if not isinstance(name, str) or not name.strip():
+                    continue                                   # skip blank/added-empty rows
+                mid = row.get("MLB_ID")
                 mid = int(mid) if pd.notna(mid) else None
-                recs.append({"name": row["Player Name"], "id": mid, "bats": row["Bats"]})
+                bats = row.get("Bats") if row.get("Bats") in ("R", "L", "S") else "R"
+                recs.append({"name": name.strip(), "id": mid, "bats": bats})
             return recs
 
         away_recs = df_to_records(st.session_state.away_df)
@@ -869,6 +955,36 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
+        # ---- Value / edge finder (only if user entered book lines) ----
+        edges = []
+        for mprob, vml, tm in [
+            (betting['away_win_pct'], vegas_away_ml, chosen['away_team_name'].split()[-1]),
+            (betting['home_win_pct'], vegas_home_ml, chosen['home_team_name'].split()[-1])]:
+            vp = moneyline_to_prob(vml)
+            if vp is not None:
+                edges.append((tm, mprob, vp, mprob - vp, vml))
+        try:
+            total_line = float(vegas_total)
+        except (TypeError, ValueError):
+            total_line = None
+
+        if edges or total_line is not None:
+            st.markdown("### 💵 Value vs. the Book")
+            cols = st.columns(len(edges) + (1 if total_line is not None else 0))
+            i = 0
+            for tm, mprob, vp, edge, vml in edges:
+                verdict = "🟢 VALUE" if edge > 0.02 else ("🟡 slight edge" if edge > 0 else "🔴 no edge")
+                cols[i].metric(f"{tm} ML {vml}", f"{edge*100:+.1f}%",
+                               help=f"Model {mprob*100:.1f}% vs book-implied {vp*100:.1f}%")
+                cols[i].caption(verdict)
+                i += 1
+            if total_line is not None:
+                p_over = float(np.mean(np.array(betting['raw_totals']) > total_line))
+                pick = "OVER" if betting['avg_total_runs'] > total_line else "UNDER"
+                cols[i].metric(f"O/U {total_line}", pick,
+                               help=f"Model projects {betting['avg_total_runs']:.2f} total runs")
+                cols[i].caption(f"P(over) ≈ {p_over*100:.0f}%")
+
         st.markdown("### 📈 Total-Runs Distribution")
         counts = pd.Series(betting["raw_totals"]).value_counts()
         chart_df = pd.DataFrame({"Runs": list(range(0, 21)),
@@ -897,6 +1013,46 @@ def main():
         dfp = pd.DataFrame.from_dict(pitchers, orient="index")
         dfp.columns = ["IP", "K", "BB", "ERA"]
         st.table(dfp)
+
+        # ---- Player prop probabilities ----
+        with st.expander("🎯 Player Prop Probabilities (over/under lines)"):
+            def hitter_props(records):
+                rows = []
+                for r in records:
+                    if r["name"] not in hitters:
+                        continue
+                    h = hitters[r["name"]]
+                    exp_h, exp_hr, exp_tb = float(h["h"]), float(h["hr"]), float(h["so"])
+                    rows.append({
+                        "Player": r["name"],
+                        "1+ Hit": f"{prob_at_least_one(exp_h)*100:.0f}%",
+                        "2+ Hits": f"{poisson_sf(1, exp_h)*100:.0f}%",
+                        "Hits a HR": f"{prob_at_least_one(exp_hr)*100:.0f}%",
+                        "Exp Hits": f"{exp_h:.2f}",
+                    })
+                return pd.DataFrame(rows).set_index("Player")
+
+            st.markdown(f"**🚀 {chosen['away_team_name']} — hitter props**")
+            st.table(hitter_props(away_recs))
+            st.markdown(f"**🏠 {chosen['home_team_name']} — hitter props**")
+            st.table(hitter_props(home_recs))
+
+            st.markdown("**⚾ Starting-pitcher strikeout props**")
+            prows = []
+            for pname, pstat in pitchers.items():
+                if "[Bullpen]" in pname:
+                    continue
+                expk = float(pstat["k"])
+                line = round(expk - 0.5) + 0.5 if expk >= 1 else 0.5   # nearest half line
+                prows.append({
+                    "Pitcher": pname,
+                    "Exp Ks": f"{expk:.1f}",
+                    "Line": f"{line:.1f}",
+                    "Over %": f"{poisson_sf(int(line), expk)*100:.0f}%",
+                })
+            if prows:
+                st.table(pd.DataFrame(prows).set_index("Pitcher"))
+            st.caption("Props use a Poisson model on each projection — approximate, for guidance.")
 
 
 if __name__ == "__main__":
