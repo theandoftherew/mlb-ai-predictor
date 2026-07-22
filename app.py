@@ -58,6 +58,45 @@ PARK_FACTORS = {
 }
 NEUTRAL_PARK = {"runs": 100, "hr": 100}
 
+# --- Dark "sportsbook" visual theme (injected once in main) ---
+CUSTOM_CSS = """
+<style>
+#MainMenu, footer {visibility:hidden;}
+html, body, [class*="css"] { font-family:'Inter','Segoe UI',sans-serif; }
+.block-container { padding-top:1.6rem; }
+
+.hero { background:linear-gradient(135deg,#0d1117 0%,#12291d 100%);
+  border:1px solid #1f6f43; border-radius:16px; padding:24px 30px; margin-bottom:10px; }
+.hero h1 { margin:0; font-size:2.25rem; font-weight:800; letter-spacing:-.5px;
+  background:linear-gradient(90deg,#00e676,#7CFFB0); -webkit-background-clip:text;
+  background-clip:text; -webkit-text-fill-color:transparent; }
+.hero p { margin:.4rem 0 0; color:#93a0b0; font-size:.97rem; }
+
+[data-testid="stMetric"] { background:#161b26; border:1px solid #263043;
+  border-radius:14px; padding:14px 18px; }
+[data-testid="stMetricValue"] { color:#00e676; font-weight:800; }
+[data-testid="stMetricLabel"] { color:#93a0b0; }
+
+.stButton>button { background:linear-gradient(90deg,#00e676,#00c853); color:#04130a;
+  font-weight:800; border:0; border-radius:12px; padding:.6rem 1.3rem;
+  box-shadow:0 4px 18px rgba(0,230,118,.25); transition:transform .08s ease,filter .08s ease; }
+.stButton>button:hover { transform:translateY(-1px); filter:brightness(1.06); }
+
+.odds-wrap { display:flex; gap:16px; flex-wrap:wrap; margin:4px 0 10px; }
+.odds-card { flex:1; min-width:200px; background:#161b26; border:1px solid #263043;
+  border-radius:16px; padding:18px 22px; text-align:center; }
+.odds-card .team { color:#c7d0dc; font-size:.92rem; font-weight:600; }
+.odds-card .win { font-size:2.3rem; font-weight:800; color:#e6e9ef; margin:.15rem 0; }
+.odds-card .ml { display:inline-block; margin-top:.3rem; padding:.18rem .75rem;
+  border-radius:999px; font-weight:800; font-size:1rem;
+  background:rgba(255,196,0,.12); color:#ffc400; border:1px solid rgba(255,196,0,.35); }
+.odds-card.total { border-color:#1f6f43; }
+.odds-card.total .win { color:#00e676; }
+.odds-card.total .sub { color:#93a0b0; font-size:.85rem; margin-top:.2rem; }
+h2, h3 { letter-spacing:-.3px; }
+</style>
+"""
+
 # Full team name -> Statcast abbreviation (for looking up per-team bullpen profiles).
 TEAM_NAME_TO_ABBR = {
     "Arizona Diamondbacks": "AZ", "Atlanta Braves": "ATL", "Baltimore Orioles": "BAL",
@@ -668,7 +707,12 @@ compute_league_baselines = st.cache_data(_compute_league_baselines)
 # =====================================================================
 def main():
     st.set_page_config(page_title="MLB AI Predictor", page_icon="⚾", layout="wide")
-    st.title("⚾ MLB AI Predictor Studio")
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+    st.markdown(
+        '<div class="hero"><h1>⚾ MLB AI Predictor</h1>'
+        '<p>Monte-Carlo game simulation · live lineups · platoon, park, weather '
+        '& bullpen-aware · backtest-validated</p></div>',
+        unsafe_allow_html=True)
 
     raw_df, pa_df = load_data()
     if pa_df is None:
@@ -802,24 +846,35 @@ def main():
         st.balloons()
 
         st.markdown("## 💰 Betting & Market Metrics")
-        b1, b2, b3 = st.columns(3)
-        with b1:
-            st.metric("Projected Total Runs (O/U)", f"{betting['avg_total_runs']:.2f}")
-            st.write(f"**{chosen['away_team_name']}:** {betting['away_exp_runs']:.1f} runs")
-            st.write(f"**{chosen['home_team_name']}:** {betting['home_exp_runs']:.1f} runs")
-        with b2:
-            st.metric(f"{chosen['away_team_name']} Win", f"{betting['away_win_pct']*100:.1f}%")
-            st.subheader(f"ML: `{convert_prob_to_moneyline(betting['away_win_pct'])}`")
-        with b3:
-            st.metric(f"{chosen['home_team_name']} Win", f"{betting['home_win_pct']*100:.1f}%")
-            st.subheader(f"ML: `{convert_prob_to_moneyline(betting['home_win_pct'])}`")
+        away_ml = convert_prob_to_moneyline(betting['away_win_pct'])
+        home_ml = convert_prob_to_moneyline(betting['home_win_pct'])
+        st.markdown(f"""
+        <div class="odds-wrap">
+          <div class="odds-card">
+            <div class="team">🚀 {chosen['away_team_name']}</div>
+            <div class="win">{betting['away_win_pct']*100:.1f}%</div>
+            <div class="ml">ML {away_ml}</div>
+          </div>
+          <div class="odds-card total">
+            <div class="team">📊 Total Runs (O/U)</div>
+            <div class="win">{betting['avg_total_runs']:.1f}</div>
+            <div class="sub">{chosen['away_team_name'].split()[-1]} {betting['away_exp_runs']:.1f}
+                &nbsp;·&nbsp; {chosen['home_team_name'].split()[-1]} {betting['home_exp_runs']:.1f}</div>
+          </div>
+          <div class="odds-card">
+            <div class="team">🏠 {chosen['home_team_name']}</div>
+            <div class="win">{betting['home_win_pct']*100:.1f}%</div>
+            <div class="ml">ML {home_ml}</div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
 
         st.markdown("### 📈 Total-Runs Distribution")
         counts = pd.Series(betting["raw_totals"]).value_counts()
         chart_df = pd.DataFrame({"Runs": list(range(0, 21)),
                                  "Occurrences": [int(counts.get(r, 0)) for r in range(0, 21)]})
         st.altair_chart(
-            alt.Chart(chart_df).mark_bar(color="#1f77b4").encode(
+            alt.Chart(chart_df).mark_bar(color="#00e676", cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
                 x=alt.X("Runs:O", axis=alt.Axis(labelAngle=0, title="Total Runs")),
                 y=alt.Y("Occurrences:Q", title="Frequency"),
                 tooltip=["Runs", "Occurrences"],
