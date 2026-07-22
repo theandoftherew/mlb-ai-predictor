@@ -1,0 +1,15 @@
+# Full Statcast pull (689 MB) — too big for GitHub. Regenerate with fetch_data.py.
+# The app runs on the slim mlb_batting_data.csv (23 MB), which IS committed.
+mlb_batting_data_full.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+
+# Claude Code local settings
+.claude/

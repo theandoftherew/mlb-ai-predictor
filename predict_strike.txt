@@ -1,0 +1,134 @@
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+import random
+
+print("Loading MLB Statcast data & training full AI pipeline...")
+df = pd.read_csv("mlb_batting_data.csv")
+
+# --- MULTI-BRAIN AI PIPELINE TRAINING ---
+df_ump = df[df['description'].isin(['ball', 'called_strike'])].dropna(subset=['release_speed', 'pfx_x', 'pfx_z', 'plate_x', 'plate_z'])
+ump_model = RandomForestClassifier(n_estimators=50, random_state=42).fit(df_ump[['release_speed', 'pfx_x', 'pfx_z', 'plate_x', 'plate_z']], df_ump['description'].apply(lambda x: 1 if x == 'called_strike' else 0))
+
+df_swings = df[df['description'].isin(['swinging_strike', 'foul', 'hit_into_play'])].dropna(subset=['release_speed', 'pfx_x', 'pfx_z', 'plate_x', 'plate_z'])
+whiff_model = RandomForestClassifier(n_estimators=50, random_state=42).fit(df_swings[['release_speed', 'pfx_x', 'pfx_z', 'plate_x', 'plate_z']], df_swings['description'].apply(lambda x: 1 if x == 'swinging_strike' else 0))
+
+valid_events = ['single', 'double', 'triple', 'home_run', 'field_out', 'field_error', 'grounded_into_double_play', 'sac_fly']
+df_contact = df[(df['description'] == 'hit_into_play') & (df['events'].isin(valid_events))].dropna(subset=['release_speed', 'pfx_x', 'pfx_z', 'plate_x', 'plate_z', 'bb_type'])
+X_c = df_contact[['release_speed', 'pfx_x', 'pfx_z', 'plate_x', 'plate_z']]
+contact_model = RandomForestClassifier(n_estimators=50, random_state=42).fit(X_c, df_contact['events'])
+trajectory_model = RandomForestClassifier(n_estimators=50, random_state=42).fit(X_c, df_contact['bb_type'])
+
+print("AI Models Primed for Game Simulation.")
+
+# --- SIMULATION ENGINES ---
+
+def simulate_at_bat():
+    balls, strikes = 0, 0
+    while True:
+        random_index = random.randint(0, len(X_c) - 1)
+        current_pitch = X_c.iloc[[random_index]]
+        is_strike = ump_model.predict(current_pitch)[0]
+        is_whiff = whiff_model.predict(current_pitch)[0]
+        
+        if random.choice([True, False]):
+            if is_whiff == 1: strikes += 1
+            else: return contact_model.predict(current_pitch)[0], trajectory_model.predict(current_pitch)[0]
+        else:
+            if is_strike == 1: strikes += 1
+            else: balls += 1
+                
+        if strikes >= 3: return "strikeout", "none"
+        if balls >= 4: return "walk", "none"
+
+def play_half_inning_with_walkoff(current_inning, target_score_to_beat=None):
+    """Runs a half-inning, but stops instantly if a walk-off occurs."""
+    outs = 0
+    runs = 0
+    first_base, second_base, third_base = 0, 0, 0
+    
+    while outs < 3:
+        event, traj = simulate_at_bat()
+        runs_this_play = 0
+        
+        if event in ['strikeout', 'field_out']:
+            outs += 1
+        elif event == 'grounded_into_double_play':
+            outs += 2 if first_base == 1 and outs < 2 else 1
+            first_base = 0
+        elif event == 'sac_fly':
+            outs += 1
+            if third_base == 1:
+                runs_this_play = 1
+                third_base = 0
+        elif event == 'walk':
+            if first_base == 1:
+                if second_base == 1:
+                    if third_base == 1: runs_this_play = 1
+                    third_base = second_base
+                second_base = first_base
+            first_base = 1
+        elif event == 'single' or event == 'field_error':
+            runs_this_play = third_base + second_base
+            third_base, second_base = 0, first_base
+            first_base = 1
+        elif event == 'double':
+            runs_this_play = third_base + second_base + first_base
+            third_base, second_base, first_base = 0, 1, 0
+        elif event == 'triple':
+            runs_this_play = third_base + second_base + first_base
+            third_base, second_base, first_base = 1, 0, 0
+        elif event == 'home_run':
+            runs_this_play = third_base + second_base + first_base + 1
+            third_base, second_base, first_base = 0, 0, 0
+            
+        runs += runs_this_play
+        
+        # LIVE WALK-OFF CHECK: If it's the bottom of the 9th+ and Home Team takes the lead, game ends instantly.
+        if target_score_to_beat is not None and runs > target_score_to_beat:
+            print("➡️ WALK-OFF WINNER!")
+            return runs
+            
+    return runs
+
+# --- MASTER GAME LOOP ---
+print("\n=============================================")
+print("      PLAY BALL: SIMULATING FULL GAME        ")
+print("=============================================")
+
+away_runs = 0
+home_runs = 0
+inning = 1
+game_active = True
+
+while game_active:
+    # Top of the Inning (Away Team)
+    away_runs += play_half_inning_with_walkoff(inning)
+    
+    # Bottom of the 9th (or later) Check: Does Home team even need to bat?
+    if inning >= 9 and home_runs > away_runs:
+        print(f"-> Inning {inning}: Home team is already winning. Bottom of the inning skipped!")
+        game_active = False
+        break
+        
+    # Bottom of the Inning (Home Team - with live walk-off target checking)
+    if inning >= 9:
+        home_runs += play_half_inning_with_walkoff(inning, target_score_to_beat=(away_runs - home_runs))
+    else:
+        home_runs += play_half_inning_with_walkoff(inning)
+        
+    # End of Standard 9 Innings Check
+    if inning >= 9:
+        if away_runs != home_runs:
+            game_active = False # Someone won!
+        else:
+            print(f"-> End of the 9th: Tied at {away_runs}-{home_runs}! Going to Extra Innings...")
+            
+    inning += 1
+
+print("\n=============================================")
+print("          FINAL OFFICIAL BOX SCORE           ")
+print("=============================================")
+print(f"  TOTAL INNINGS PLAYED: {inning - 1}")
+print(f"  AWAY TEAM: {away_runs} RUNS")
+print(f"  HOME TEAM: {home_runs} RUNS")
+print("=============================================")
