@@ -65,39 +65,56 @@ NEUTRAL_PARK = {"runs": 100, "hr": 100}
 # --- Dark "sportsbook" visual theme (injected once in main) ---
 CUSTOM_CSS = """
 <style>
-#MainMenu, footer {visibility:hidden;}
-html, body, [class*="css"] { font-family:'Inter','Segoe UI',sans-serif; }
-.block-container { padding-top:1.6rem; }
+/* Hide Streamlit's chrome so it reads like a normal website */
+#MainMenu, footer, header[data-testid="stHeader"] { display:none !important; }
+[data-testid="stToolbar"], [data-testid="stStatusWidget"], [data-testid="stDecoration"] { display:none !important; }
 
-.hero { background:linear-gradient(135deg,#0d1117 0%,#12291d 100%);
-  border:1px solid #1f6f43; border-radius:16px; padding:24px 30px; margin-bottom:10px; }
-.hero h1 { margin:0; font-size:2.25rem; font-weight:800; letter-spacing:-.5px;
-  background:linear-gradient(90deg,#00e676,#7CFFB0); -webkit-background-clip:text;
+html, body, [class*="css"] { font-family:'Inter','Segoe UI',system-ui,sans-serif; }
+/* Centered, comfortable content width */
+.block-container { max-width:1160px; padding-top:2.2rem; padding-bottom:4rem; }
+hr { border-color:#1c2430; margin:1.4rem 0; }
+h2, h3 { letter-spacing:-.4px; font-weight:800; }
+
+.hero { position:relative;
+  background:radial-gradient(1100px 220px at 18% -40%, rgba(0,230,118,.16), transparent),
+             linear-gradient(135deg,#0d1117 0%,#10241b 100%);
+  border:1px solid #1f6f43; border-radius:20px; padding:34px 38px; margin-bottom:22px;
+  box-shadow:0 12px 44px rgba(0,0,0,.35); }
+.hero .eyebrow { display:inline-block; font-size:.7rem; font-weight:800; letter-spacing:.13em;
+  text-transform:uppercase; color:#04130a; background:#00e676; padding:.24rem .65rem;
+  border-radius:999px; margin-bottom:.85rem; }
+.hero h1 { margin:0; font-size:2.7rem; font-weight:900; letter-spacing:-1px; line-height:1.05;
+  background:linear-gradient(90deg,#00e676,#8affbe); -webkit-background-clip:text;
   background-clip:text; -webkit-text-fill-color:transparent; }
-.hero p { margin:.4rem 0 0; color:#93a0b0; font-size:.97rem; }
+.hero p { margin:.6rem 0 0; color:#9aa7b6; font-size:1.02rem; max-width:660px; }
 
-[data-testid="stMetric"] { background:#161b26; border:1px solid #263043;
-  border-radius:14px; padding:14px 18px; }
+[data-testid="stMetric"] { background:#141a24; border:1px solid #263043;
+  border-radius:16px; padding:16px 20px; }
 [data-testid="stMetricValue"] { color:#00e676; font-weight:800; }
 [data-testid="stMetricLabel"] { color:#93a0b0; }
 
 .stButton>button { background:linear-gradient(90deg,#00e676,#00c853); color:#04130a;
-  font-weight:800; border:0; border-radius:12px; padding:.6rem 1.3rem;
-  box-shadow:0 4px 18px rgba(0,230,118,.25); transition:transform .08s ease,filter .08s ease; }
-.stButton>button:hover { transform:translateY(-1px); filter:brightness(1.06); }
+  font-weight:800; border:0; border-radius:12px; padding:.55rem 1.3rem;
+  box-shadow:0 4px 18px rgba(0,230,118,.28); transition:transform .08s ease,filter .08s ease; }
+.stButton>button:hover { transform:translateY(-1px); filter:brightness(1.07); }
 
-.odds-wrap { display:flex; gap:16px; flex-wrap:wrap; margin:4px 0 10px; }
-.odds-card { flex:1; min-width:200px; background:#161b26; border:1px solid #263043;
-  border-radius:16px; padding:18px 22px; text-align:center; }
+[data-testid="stExpander"] { border:1px solid #232c3a; border-radius:14px;
+  background:#10151d; overflow:hidden; }
+[data-testid="stExpander"] summary { font-weight:700; }
+.stTextInput input, .stNumberInput input { background:#141a24; }
+thead tr th { background:#141a24 !important; color:#c7d0dc !important; }
+
+.odds-wrap { display:flex; gap:16px; flex-wrap:wrap; margin:6px 0 12px; }
+.odds-card { flex:1; min-width:200px; background:#141a24; border:1px solid #263043;
+  border-radius:18px; padding:20px 22px; text-align:center; box-shadow:0 6px 24px rgba(0,0,0,.25); }
 .odds-card .team { color:#c7d0dc; font-size:.92rem; font-weight:600; }
-.odds-card .win { font-size:2.3rem; font-weight:800; color:#e6e9ef; margin:.15rem 0; }
-.odds-card .ml { display:inline-block; margin-top:.3rem; padding:.18rem .75rem;
+.odds-card .win { font-size:2.5rem; font-weight:900; color:#e6e9ef; margin:.15rem 0; letter-spacing:-1px; }
+.odds-card .ml { display:inline-block; margin-top:.3rem; padding:.2rem .8rem;
   border-radius:999px; font-weight:800; font-size:1rem;
   background:rgba(255,196,0,.12); color:#ffc400; border:1px solid rgba(255,196,0,.35); }
 .odds-card.total { border-color:#1f6f43; }
 .odds-card.total .win { color:#00e676; }
 .odds-card.total .sub { color:#93a0b0; font-size:.85rem; margin-top:.2rem; }
-h2, h3 { letter-spacing:-.3px; }
 .batnum { padding-top:6px; font-weight:800; color:#00e676; text-align:center; font-size:1.1rem; }
 </style>
 """
@@ -860,9 +877,10 @@ def main():
     st.set_page_config(page_title="MLB AI Predictor", page_icon="⚾", layout="wide")
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
     st.markdown(
-        '<div class="hero"><h1>⚾ MLB AI Predictor</h1>'
-        '<p>Monte-Carlo game simulation · live lineups · platoon, park, weather '
-        '& bullpen-aware · backtest-validated</p></div>',
+        '<div class="hero"><span class="eyebrow">Live · Backtest-validated</span>'
+        '<h1>⚾ MLB AI Predictor</h1>'
+        '<p>Monte-Carlo game simulation with live lineups, platoon &amp; park factors, '
+        'weather, and bullpen strength — plus a public, self-updating accuracy track record.</p></div>',
         unsafe_allow_html=True)
 
     raw_df, pa_df = load_data()
@@ -1135,7 +1153,6 @@ when it says 60%, that side wins about 60% of the time.
             st.error(f"😕 Something went wrong running the simulation. Try reselecting the game "
                      f"or reloading lineups.\n\n`{type(e).__name__}: {e}`")
             st.stop()
-        st.balloons()
 
         st.markdown("## 💰 Betting & Market Metrics")
         away_ml = prob_to_odds(betting['away_win_pct'], odds_fmt)
