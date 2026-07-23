@@ -18,7 +18,12 @@ import altair as alt
 
 # Bump this whenever the model's math/weights change, so the performance log can
 # compare versions on their real, realized results.
-MODEL_VERSION = "v1.0-recency150-bullpen"
+MODEL_VERSION = "v1.1-homefield"
+
+# Home-field advantage: home hitters get a small offensive boost, away hitters a
+# small penalty. Real MLB home teams win ~54%; without this the model under-rates
+# them (calibration dots sit above the line). Tuned via backtest.
+HOME_FIELD_ADV = 0.04
 
 # Which "events" values count as hits, and which do NOT count as at-bats.
 HIT_EVENTS = ['single', 'double', 'triple', 'home_run']
@@ -602,8 +607,9 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
     away_wins = home_wins = 0
     tot_runs, away_runs_list, home_runs_list = [], [], []
 
-    def plate_appearance(batter_name, pit_name, bases, outs):
-        """Resolve one PA. Returns (outs_added, runs_scored, updated_bases)."""
+    def plate_appearance(batter_name, pit_name, bases, outs, off_mult):
+        """Resolve one PA. Returns (outs_added, runs_scored, updated_bases).
+        `off_mult` scales the batting team's offense (home-field advantage)."""
         b1, b2, b3 = bases
         bp = bat_prof[batter_name]
         pp = pit_prof[pit_name]
@@ -643,7 +649,7 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
             pitching[pit_name]["k"] += 1
         else:                                    # BALL IN PLAY
             batting[batter_name]["ab"] += 1
-            prob_hit = min(0.95, log5(b_rate["chit"], p_rate["chit"], lg["chit"]) * HIT_ENV)
+            prob_hit = min(0.95, log5(b_rate["chit"], p_rate["chit"], lg["chit"]) * HIT_ENV * off_mult)
             if random.random() < prob_hit:       # HIT
                 batting[batter_name]["h"] += 1
                 hr_r = min(0.95, bp["hr"] * HR_ENV)
@@ -712,7 +718,7 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
                 if h_pitches >= h_limit: h_hooked = True
                 pit_name = f"{home_p['name']} [Bullpen]" if h_hooked else home_p["name"]
                 name = away_names[away_ptr]
-                oa, _r, bases = plate_appearance(name, pit_name, bases, outs)
+                oa, _r, bases = plate_appearance(name, pit_name, bases, outs, 1.0 - HOME_FIELD_ADV)
                 if not h_hooked:
                     h_pitches += simulate_pitch_sequence("contact")
                 a_runs += _r
@@ -726,7 +732,7 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
                 if a_pitches >= a_limit: a_hooked = True
                 pit_name = f"{away_p['name']} [Bullpen]" if a_hooked else away_p["name"]
                 name = home_names[home_ptr]
-                oa, _r, bases = plate_appearance(name, pit_name, bases, outs)
+                oa, _r, bases = plate_appearance(name, pit_name, bases, outs, 1.0 + HOME_FIELD_ADV)
                 if not a_hooked:
                     a_pitches += simulate_pitch_sequence("contact")
                 h_runs += _r
@@ -822,12 +828,15 @@ def render_track_record():
         trs["cum_acc"] = trs["correct"].expanding().mean() * 100
         burn = min(15, max(1, len(trs) // 5))          # hide the wild first few games
         plot = trs[trs["game_no"] >= burn]
+        lo = min(float(plot["cum_acc"].min()), 49.0) - 3     # pad + always include 50%
+        hi = max(float(plot["cum_acc"].max()), 51.0) + 3
+        yscale = alt.Scale(domain=[lo, hi])
         st.markdown("**Cumulative winner accuracy** — the model's running win-rate")
         coin = alt.Chart(pd.DataFrame({"y": [50]})).mark_rule(
-            strokeDash=[5, 4], color="#8a94a3").encode(y="y:Q")
+            strokeDash=[5, 4], color="#8a94a3").encode(y=alt.Y("y:Q", scale=yscale))
         line = alt.Chart(plot).mark_line(color="#00e676", strokeWidth=2.5).encode(
             x=alt.X("game_no:Q", title="games graded"),
-            y=alt.Y("cum_acc:Q", title="accuracy %", scale=alt.Scale(zero=False)),
+            y=alt.Y("cum_acc:Q", title="accuracy %", scale=yscale),
             tooltip=["game_no", alt.Tooltip("cum_acc:Q", format=".1f")])
         st.altair_chart((coin + line).properties(height=240), use_container_width=True)
         st.caption("Dashed line = 50% (a coin flip). Above it means the model beats a coin flip. "
