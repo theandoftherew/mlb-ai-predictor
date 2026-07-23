@@ -820,13 +820,18 @@ def render_track_record():
         trs = tr.sort_values("pred_date").reset_index(drop=True)
         trs["game_no"] = range(1, len(trs) + 1)
         trs["cum_acc"] = trs["correct"].expanding().mean() * 100
-        st.markdown("**Cumulative winner accuracy** (settles as more games are graded)")
-        st.altair_chart(
-            alt.Chart(trs).mark_line(color="#00e676").encode(
-                x=alt.X("game_no:Q", title="games graded"),
-                y=alt.Y("cum_acc:Q", title="accuracy %", scale=alt.Scale(domain=[35, 65])),
-                tooltip=["game_no", alt.Tooltip("cum_acc:Q", format=".1f")],
-            ).properties(height=220), use_container_width=True)
+        burn = min(15, max(1, len(trs) // 5))          # hide the wild first few games
+        plot = trs[trs["game_no"] >= burn]
+        st.markdown("**Cumulative winner accuracy** — the model's running win-rate")
+        coin = alt.Chart(pd.DataFrame({"y": [50]})).mark_rule(
+            strokeDash=[5, 4], color="#8a94a3").encode(y="y:Q")
+        line = alt.Chart(plot).mark_line(color="#00e676", strokeWidth=2.5).encode(
+            x=alt.X("game_no:Q", title="games graded"),
+            y=alt.Y("cum_acc:Q", title="accuracy %", scale=alt.Scale(zero=False)),
+            tooltip=["game_no", alt.Tooltip("cum_acc:Q", format=".1f")])
+        st.altair_chart((coin + line).properties(height=240), use_container_width=True)
+        st.caption("Dashed line = 50% (a coin flip). Above it means the model beats a coin flip. "
+                   "The line steadies out as more games are graded.")
 
         trs["bucket"] = pd.cut(trs["pred_home_win_pct"], [0, .35, .45, .55, .65, 1.01],
                                labels=["<35%", "35-45%", "45-55%", "55-65%", ">65%"])
@@ -835,16 +840,19 @@ def render_track_record():
                     n=("home_won", "size")).reset_index().dropna())
         if len(cal):
             cal["pred"] *= 100; cal["actual"] *= 100
-            st.markdown("**Calibration** — dots near the dashed line = honest probabilities")
+            st.markdown("**Calibration** — when the model says *X%*, do teams actually win *X%*?")
             diag = alt.Chart(pd.DataFrame({"x": [0, 100], "y": [0, 100]})).mark_line(
                 strokeDash=[4, 4], color="#5a6472").encode(x="x:Q", y="y:Q")
-            pts = alt.Chart(cal).mark_circle(color="#00e676").encode(
-                x=alt.X("pred:Q", title="predicted home win %", scale=alt.Scale(domain=[0, 100])),
-                y=alt.Y("actual:Q", title="actual home win %", scale=alt.Scale(domain=[0, 100])),
-                size=alt.Size("n:Q", legend=None, scale=alt.Scale(range=[80, 500])),
-                tooltip=["bucket", alt.Tooltip("pred:Q", format=".0f"),
-                         alt.Tooltip("actual:Q", format=".0f"), "n"])
-            st.altair_chart((diag + pts).properties(height=260), use_container_width=True)
+            pts = alt.Chart(cal).mark_circle(color="#00e676", opacity=0.9).encode(
+                x=alt.X("pred:Q", title="model's predicted win %", scale=alt.Scale(domain=[20, 80])),
+                y=alt.Y("actual:Q", title="how often they actually won %", scale=alt.Scale(domain=[20, 80])),
+                size=alt.Size("n:Q", legend=None, scale=alt.Scale(range=[120, 700])),
+                tooltip=["bucket", alt.Tooltip("pred:Q", title="predicted", format=".0f"),
+                         alt.Tooltip("actual:Q", title="actual", format=".0f"), "n"])
+            st.altair_chart((diag + pts).properties(height=300), use_container_width=True)
+            st.caption("Each dot = a group of games. X = what the model predicted · Y = how often those "
+                       "teams really won. Dots **on** the dashed line = perfectly honest. **Above** the "
+                       "line = the model was too cautious; **below** = too confident. Bigger dot = more games.")
 
         if tr["model_version"].nunique() > 1:
             st.markdown("**By model version** — compare weightings on real results")
