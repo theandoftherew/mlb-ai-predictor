@@ -549,28 +549,12 @@ def prob_at_least_one(mean):
 # =====================================================================
 # 4. SIMULATION ENGINE
 # =====================================================================
-def simulate_pitch_sequence(pa_outcome):
-    """Approximate how many pitches a PA took, given its outcome."""
-    balls = strikes = total = 0
-    while True:
-        total += 1
-        if pa_outcome == 'walk' and balls == 3:
-            return total
-        if pa_outcome == 'strikeout' and strikes == 2:
-            return total
-        if pa_outcome == 'contact' and (balls == 3 or strikes == 2):
-            return total
-        if pa_outcome == 'walk':
-            balls += 1 if random.random() < 0.65 else 0
-            strikes += 0 if random.random() < 0.65 else 1
-        elif pa_outcome == 'strikeout':
-            strikes += 1 if random.random() < 0.65 else 0
-            balls += 0 if random.random() < 0.65 else 1
-        else:  # contact
-            roll = random.random()
-            if roll < 0.4: balls += 1
-            elif roll < 0.8: strikes += 1
-            else: return total
+def simulate_pitch_sequence(pa_outcome="contact"):
+    """Approximate pitches thrown in a plate appearance. MLB averages ~3.9
+    pitches/PA (walks & strikeouts run longer than balls in play); this drives
+    how deep a starter goes before hitting the pitch limit."""
+    base = {"walk": 5.3, "strikeout": 4.8}.get(pa_outcome, 3.9)
+    return max(1, int(round(random.gauss(base, 1.3))))
 
 
 def eff_stand(bats, p_throws):
@@ -777,8 +761,12 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
         outs = s["outs"] / simulations
         innings = outs / 3.0
         era = (s["er"] / simulations) / (innings / 9.0) if innings > 0 else 0.0
+        whole = int(outs // 3)                 # proper baseball IP notation (.0/.1/.2)
+        rem = int(round(outs - whole * 3))
+        if rem >= 3:
+            whole += 1; rem -= 3
         pitchers[n] = {
-            "ip": f"{int(outs // 3)}.{int(round(outs % 3))}",
+            "ip": f"{whole}.{rem}",
             "k": f"{s['k']/simulations:.2f}", "bb": f"{s['bb']/simulations:.2f}",
             "er": f"{era:.2f}",
         }
