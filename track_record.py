@@ -87,7 +87,10 @@ def seed(start, end, sims, max_games):
     _, pa = app._load_data()
     pa["game_date"] = pa["game_date"].astype(str)
     test = pa[(pa["game_date"] >= start) & (pa["game_date"] <= end)]
-    gids = test["game_pk"].dropna().unique().tolist()[:max_games]
+    gids = test["game_pk"].dropna().unique().tolist()
+    import random as _r
+    _r.seed(0); _r.shuffle(gids)                    # sample evenly across the window
+    gids = gids[:max_games]
     gid_date = test.groupby("game_pk")["game_date"].min()
 
     by_date = {}

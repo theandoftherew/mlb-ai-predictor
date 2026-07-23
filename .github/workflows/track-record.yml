@@ -4,7 +4,7 @@ name: Update model track record
 # updated predictions.csv back to the repo so the app always shows a live record.
 on:
   schedule:
-    - cron: "0 13 * * *"   # 13:00 UTC daily (before most first pitches)
+    - cron: "0 */6 * * *"   # every 6 hours (00/06/12/18 UTC) — grades finals through the day
   workflow_dispatch: {}      # allow manual runs from the Actions tab
 
 permissions:
