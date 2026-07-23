@@ -23,7 +23,7 @@ MODEL_VERSION = "v1.1-homefield"
 # Home-field advantage: home hitters get a small offensive boost, away hitters a
 # small penalty. Real MLB home teams win ~54%; without this the model under-rates
 # them (calibration dots sit above the line). Tuned via backtest.
-HOME_FIELD_ADV = 0.04
+HOME_FIELD_ADV = 0.03
 
 # Which "events" values count as hits, and which do NOT count as at-bats.
 HIT_EVENTS = ['single', 'double', 'triple', 'home_run']
