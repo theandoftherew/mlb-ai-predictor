@@ -1123,11 +1123,14 @@ when it says 60%, that side wins about 60% of the time.
         vegas_over_odds = t2.text_input("Over odds", "", placeholder=juice_ph)
         vegas_under_odds = t3.text_input("Under odds", "", placeholder=juice_ph)
 
-        st.markdown("**Run line (spread)** — e.g. Royals **-1.5** (win by 2+) or **+1.5** (lose by ≤1)")
-        r1, r2, r3 = st.columns(3)
-        rl_team = r1.selectbox("Team", [away_short, home_short])
-        rl_line = r2.text_input("Run line", "-1.5", placeholder="-1.5")
-        rl_odds = r3.text_input("Run-line odds", "", placeholder=ml_ph)
+        st.markdown("**Run line (spread)** — enter both sides (usually ±1.5) to find value")
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            away_rl = st.text_input(f"{away_short} run line", "+1.5", placeholder="+1.5")
+            away_rl_odds = st.text_input(f"{away_short} run-line odds", "", placeholder=ml_ph)
+        with rc2:
+            home_rl = st.text_input(f"{home_short} run line", "-1.5", placeholder="-1.5")
+            home_rl_odds = st.text_input(f"{home_short} run-line odds", "", placeholder=ml_ph)
 
     if st.button("🔥 RUN PREDICTOR", type="primary"):
         away_recs = lineup_records("aord", chosen['id'], len(st.session_state.away_df), st.session_state.away_roster)
@@ -1211,17 +1214,20 @@ when it says 60%, that side wins about 60% of the time.
             if tsides:
                 value_bets.append(max(tsides, key=lambda s: s[1] - s[2]))
 
-        # Run line (spread)
-        try:
-            rl = float(rl_line)
-            rl_imp = odds_to_prob(rl_odds, odds_fmt)
-        except (TypeError, ValueError):
-            rl, rl_imp = None, None
-        if rl is not None and rl_imp is not None:
-            margins = np.array(betting['raw_margins'])              # away - home per sim
-            team_margin = margins if rl_team == away_short else -margins
-            p_cover = float(np.mean(team_margin > -rl))             # covers when margin + line > 0
-            value_bets.append((f"{rl_team} {rl:+g} ({rl_odds})", p_cover, rl_imp))
+        # Run line (spread) — evaluate whichever side(s) the user entered.
+        margins = np.array(betting['raw_margins'])                  # away - home per sim
+        for team, is_away, line_str, odds_str in [
+                (away_short, True, away_rl, away_rl_odds),
+                (home_short, False, home_rl, home_rl_odds)]:
+            try:
+                line = float(line_str)
+                imp = odds_to_prob(odds_str, odds_fmt)
+            except (TypeError, ValueError):
+                line, imp = None, None
+            if line is not None and imp is not None:
+                team_margin = margins if is_away else -margins
+                p_cover = float(np.mean(team_margin > -line))       # covers when margin + line > 0
+                value_bets.append((f"{team} {line:+g} ({odds_str})", p_cover, imp))
 
         if value_bets:
             st.markdown("### 💵 Value vs. the Book")
