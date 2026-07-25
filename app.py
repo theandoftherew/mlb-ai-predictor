@@ -1207,12 +1207,12 @@ when it says 60%, that side wins about 60% of the time.
             totals = np.array(betting['raw_totals'])
             p_over = float(np.mean(totals > total_line))
             p_under = float(np.mean(totals < total_line))
-            oi, ui = odds_to_prob(vegas_over_odds, odds_fmt), odds_to_prob(vegas_under_odds, odds_fmt)
-            tsides = []
-            if oi is not None: tsides.append((f"Over {total_line} ({vegas_over_odds})", p_over, oi))
-            if ui is not None: tsides.append((f"Under {total_line} ({vegas_under_odds})", p_under, ui))
-            if tsides:
-                value_bets.append(max(tsides, key=lambda s: s[1] - s[2]))
+            oi = odds_to_prob(vegas_over_odds, odds_fmt)
+            ui = odds_to_prob(vegas_under_odds, odds_fmt)
+            if oi is not None:
+                value_bets.append((f"Over {total_line} ({vegas_over_odds})", p_over, oi))
+            if ui is not None:
+                value_bets.append((f"Under {total_line} ({vegas_under_odds})", p_under, ui))
 
         # Run line (spread) — evaluate whichever side(s) the user entered.
         margins = np.array(betting['raw_margins'])                  # away - home per sim
