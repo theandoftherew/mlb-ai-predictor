@@ -18,12 +18,16 @@ import altair as alt
 
 # Bump this whenever the model's math/weights change, so the performance log can
 # compare versions on their real, realized results.
-MODEL_VERSION = "v1.2-stamina"
+MODEL_VERSION = "v1.3-tto"
 
 # Home-field advantage: home hitters get a small offensive boost, away hitters a
 # small penalty. Real MLB home teams win ~54%; without this the model under-rates
 # them (calibration dots sit above the line). Tuned via backtest.
 HOME_FIELD_ADV = 0.03
+
+# Times-through-order penalty: a starter's offense-allowed rises each pass through
+# the lineup (+3% the 2nd time, +6% the 3rd). Real "third time through" effect.
+TTO_PENALTY = 0.03
 
 # Which "events" values count as hits, and which do NOT count as at-bats.
 HIT_EVENTS = ['single', 'double', 'triple', 'home_run']
@@ -742,7 +746,11 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
                 if h_sp_bf >= h_bf_limit: h_hooked = True
                 pit_name = f"{home_p['name']} [Bullpen]" if h_hooked else home_p["name"]
                 name = away_names[away_ptr]
-                oa, _r, bases = plate_appearance(name, pit_name, bases, outs, 1.0 - HOME_FIELD_ADV)
+                # Times-through-order: starter is tougher the 1st time, weaker the 3rd.
+                # Centered on the 2nd pass so it doesn't change his season-average rate.
+                h_tto = 0.0 if h_hooked else TTO_PENALTY * (min(h_sp_bf // 9, 2) - 1)
+                oa, _r, bases = plate_appearance(name, pit_name, bases, outs,
+                                                 (1.0 - HOME_FIELD_ADV) * (1.0 + h_tto))
                 if not h_hooked:
                     h_sp_bf += 1
                 a_runs += _r
@@ -756,7 +764,9 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
                 if a_sp_bf >= a_bf_limit: a_hooked = True
                 pit_name = f"{away_p['name']} [Bullpen]" if a_hooked else away_p["name"]
                 name = home_names[home_ptr]
-                oa, _r, bases = plate_appearance(name, pit_name, bases, outs, 1.0 + HOME_FIELD_ADV)
+                a_tto = 0.0 if a_hooked else TTO_PENALTY * (min(a_sp_bf // 9, 2) - 1)
+                oa, _r, bases = plate_appearance(name, pit_name, bases, outs,
+                                                 (1.0 + HOME_FIELD_ADV) * (1.0 + a_tto))
                 if not a_hooked:
                     a_sp_bf += 1
                 h_runs += _r
