@@ -644,7 +644,7 @@ pred_date,game_pk,away_team,home_team,model_version,pred_home_win_pct,pred_total
 2026-07-26,822870,SEA,TEX,v1.1-homefield,0.5513,7.35,-0.58,settled,6.0,4.0,0.0,0.0,0.3039,2.65,2.58
 2026-07-26,823194,LAA,SF,v1.1-homefield,0.5262,7.7,-0.25,settled,4.0,3.0,0.0,0.0,0.2769,0.7,1.25
 2026-07-26,823433,NYY,PHI,v1.1-homefield,0.5613,8.81,-0.67,settled,4.0,11.0,1.0,1.0,0.1925,6.19,6.33
-2026-07-27,822868,SEA,TEX,v1.1-homefield,0.52,9.55,-0.14,open,,,,,,,
+2026-07-27,822868,SEA,TEX,v1.1-homefield,0.52,9.55,-0.14,settled,3.0,7.0,1.0,1.0,0.2304,0.45,3.86
 2026-07-27,824245,BAL,DET,v1.1-homefield,0.5825,7.35,-0.65,open,,,,,,,
 2026-07-27,823353,AZ,PIT,v1.1-homefield,0.5387,8.93,-0.51,open,,,,,,,
 2026-07-27,823839,PHI,MIA,v1.1-homefield,0.4875,7.26,0.28,open,,,,,,,
