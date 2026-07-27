@@ -18,7 +18,7 @@ import altair as alt
 
 # Bump this whenever the model's math/weights change, so the performance log can
 # compare versions on their real, realized results.
-MODEL_VERSION = "v1.1-homefield"
+MODEL_VERSION = "v1.2-stamina"
 
 # Home-field advantage: home hitters get a small offensive boost, away hitters a
 # small penalty. Real MLB home teams win ~54%; without this the model under-rates
@@ -320,6 +320,23 @@ def compute_bullpen_profiles(pa, league):
     return profiles
 
 
+DEFAULT_STAMINA = 22.0   # batters a typical starter faces before the bullpen takes over
+
+
+def compute_pitcher_stamina(pa):
+    """Per-starter stamina = the median number of batters they face per start
+    (a start = a game where they threw in the 1st inning). Aces like Wheeler face
+    ~24-26 and go deep; back-end starters ~20 and get pulled early. Used to decide
+    when the bullpen enters, which drives projected IP and strikeouts."""
+    starters = pa[pa['inning'] == 1][['game_pk', 'pitcher']].drop_duplicates().assign(_s=1)
+    merged = pa.merge(starters, on=['game_pk', 'pitcher'], how='left')
+    starts = pa[merged['_s'].notna().values]
+    bf = starts.groupby(['pitcher', 'game_pk']).size()      # batters faced per start
+    typ = bf.groupby('pitcher').median()
+    # Nudge toward the pitcher's fuller outings (projections assume a healthy start).
+    return {int(pid): float(min(30.0, max(17.0, v + 1))) for pid, v in typ.items()}
+
+
 # NOTE: Team DEFENSE (xBA-based fielding factors) was tested here and REMOVED —
 # a 300-game backtest showed no improvement once properly centered (pitcher rates
 # already encode a team's defense, so it mostly double-counted). See project notes.
@@ -570,12 +587,17 @@ def eff_stand(bats, p_throws):
 
 
 def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simulations=1000,
-                   away_bullpen=None, home_bullpen=None):
+                   away_bullpen=None, home_bullpen=None, stamina=None):
     """Monte Carlo full-game simulator using platoon-aware matchup rates,
     park factors, and weather. `away`/`home` are lists of batter records with
     keys name/id/bats. `away_p`/`home_p` are pitcher records name/id/throws.
     `away_bullpen`/`home_bullpen` are that team's relief profile (from
-    compute_bullpen_profiles); if None, a league-average bullpen is used."""
+    compute_bullpen_profiles); if None, a league-average bullpen is used.
+    `stamina` maps pitcher id -> typical batters faced per start (compute_pitcher_stamina);
+    aces go deeper (more IP & Ks) than back-end starters."""
+    stamina = stamina or {}
+    away_stam = stamina.get(away_p.get("id"), DEFAULT_STAMINA)
+    home_stam = stamina.get(home_p.get("id"), DEFAULT_STAMINA)
 
     # --- Pre-compute every player's profile once ---
     bat_prof = {}
@@ -602,7 +624,7 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
 
     batting = {n: {"ab": 0, "h": 0, "double": 0, "triple": 0, "hr": 0,
                    "rbi": 0, "so": 0, "bb": 0} for n in away_names + home_names}
-    pitching = {n: {"outs": 0, "k": 0, "bb": 0, "er": 0} for n in pit_prof}
+    pitching = {n: {"outs": 0, "k": 0, "bb": 0, "er": 0, "h": 0} for n in pit_prof}
 
     away_wins = home_wins = 0
     tot_runs, away_runs_list, home_runs_list = [], [], []
@@ -652,6 +674,7 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
             prob_hit = min(0.95, log5(b_rate["chit"], p_rate["chit"], lg["chit"]) * HIT_ENV * off_mult)
             if random.random() < prob_hit:       # HIT
                 batting[batter_name]["h"] += 1
+                pitching[pit_name]["h"] += 1      # hit allowed (for hits-allowed prop)
                 hr_r = min(0.95, bp["hr"] * HR_ENV)
                 t = random.random()
                 if t < hr_r:                     # HOME RUN
@@ -706,21 +729,22 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
     for _ in range(simulations):
         away_ptr = home_ptr = 0
         a_runs = h_runs = 0
-        a_pitches = h_pitches = 0
+        a_sp_bf = h_sp_bf = 0                     # batters the starter has faced
         a_hooked = h_hooked = False
-        a_limit = random.randint(85, 105)
-        h_limit = random.randint(85, 105)
+        # This start's hook point varies around the pitcher's typical stamina.
+        h_bf_limit = max(14, int(round(random.gauss(home_stam, 2.5))))
+        a_bf_limit = max(14, int(round(random.gauss(away_stam, 2.5))))
 
         for _inning in range(1, 10):
             # ---- TOP: away bats, home pitches ----
             outs = 0; bases = (0, 0, 0)
             while outs < 3:
-                if h_pitches >= h_limit: h_hooked = True
+                if h_sp_bf >= h_bf_limit: h_hooked = True
                 pit_name = f"{home_p['name']} [Bullpen]" if h_hooked else home_p["name"]
                 name = away_names[away_ptr]
                 oa, _r, bases = plate_appearance(name, pit_name, bases, outs, 1.0 - HOME_FIELD_ADV)
                 if not h_hooked:
-                    h_pitches += simulate_pitch_sequence("contact")
+                    h_sp_bf += 1
                 a_runs += _r
                 outs += oa
                 pitching[pit_name]["outs"] += oa
@@ -729,12 +753,12 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
             # ---- BOTTOM: home bats, away pitches ----
             outs = 0; bases = (0, 0, 0)
             while outs < 3:
-                if a_pitches >= a_limit: a_hooked = True
+                if a_sp_bf >= a_bf_limit: a_hooked = True
                 pit_name = f"{away_p['name']} [Bullpen]" if a_hooked else away_p["name"]
                 name = home_names[home_ptr]
                 oa, _r, bases = plate_appearance(name, pit_name, bases, outs, 1.0 + HOME_FIELD_ADV)
                 if not a_hooked:
-                    a_pitches += simulate_pitch_sequence("contact")
+                    a_sp_bf += 1
                 h_runs += _r
                 outs += oa
                 pitching[pit_name]["outs"] += oa
@@ -774,7 +798,7 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
         pitchers[n] = {
             "ip": f"{whole}.{rem}",
             "k": f"{s['k']/simulations:.2f}", "bb": f"{s['bb']/simulations:.2f}",
-            "er": f"{era:.2f}",
+            "h": f"{s['h']/simulations:.2f}", "er": f"{era:.2f}",
         }
 
     betting = {
@@ -894,9 +918,11 @@ def main():
         st.stop()
     pa_df = add_recency_weights(pa_df, datetime.today())   # weight recent form higher
     league = compute_league_baselines(pa_df)
-    if "bullpens" not in st.session_state:                  # compute once per session (fast reruns)
+    if "stamina" not in st.session_state:                  # compute once per session (fast reruns)
         st.session_state.bullpens = compute_bullpen_profiles(pa_df, league)
+        st.session_state.stamina = compute_pitcher_stamina(pa_df)
     bullpens = st.session_state.bullpens
+    stamina = st.session_state.stamina
 
     data_through = pd.to_datetime(pa_df["game_date"], errors="coerce").max()
     data_through_str = data_through.strftime("%B %-d, %Y") if pd.notna(data_through) else "unknown"
@@ -979,7 +1005,8 @@ when it says 60%, that side wins about 60% of the time.
                         PARK_FACTORS.get(g["home_team_name"], NEUTRAL_PARK),
                         {"temp": 70, "wind_mph": 5, "wind_dir": "Neutral"},
                         league, pa_df, simulations=400,
-                        away_bullpen=bullpens.get(aabbr), home_bullpen=bullpens.get(habbr))
+                        away_bullpen=bullpens.get(aabbr), home_bullpen=bullpens.get(habbr),
+                        stamina=stamina)
                     fav = (g["away_team_name"] if bet["away_win_pct"] > bet["home_win_pct"]
                            else g["home_team_name"])
                     slate_rows.append({
@@ -1156,7 +1183,8 @@ when it says 60%, that side wins about 60% of the time.
                 hitters, pitchers, betting = simulate_games(
                     away_recs, home_recs, st.session_state.away_p, st.session_state.home_p,
                     park, weather, league, pa_df, simulations=sim_count,
-                    away_bullpen=bullpens.get(away_abbr), home_bullpen=bullpens.get(home_abbr))
+                    away_bullpen=bullpens.get(away_abbr), home_bullpen=bullpens.get(home_abbr),
+                    stamina=stamina)
         except Exception as e:
             st.error(f"😕 Something went wrong running the simulation. Try reselecting the game "
                      f"or reloading lineups.\n\n`{type(e).__name__}: {e}`")
@@ -1266,7 +1294,8 @@ when it says 60%, that side wins about 60% of the time.
 
         st.markdown("### 🥎 Projected Pitching")
         dfp = pd.DataFrame.from_dict(pitchers, orient="index")
-        dfp.columns = ["IP", "K", "BB", "ERA"]
+        dfp = dfp[["ip", "k", "h", "bb", "er"]]
+        dfp.columns = ["IP", "K", "Hits", "BB", "ERA"]
         st.table(dfp)
 
         # ---- Player prop probabilities ----
@@ -1292,18 +1321,20 @@ when it says 60%, that side wins about 60% of the time.
             st.markdown(f"**🏠 {chosen['home_team_name']} — hitter props**")
             st.table(hitter_props(home_recs))
 
-            st.markdown("**⚾ Starting-pitcher strikeout props**")
+            st.markdown("**⚾ Starting-pitcher props** (strikeouts & hits allowed)")
             prows = []
             for pname, pstat in pitchers.items():
                 if "[Bullpen]" in pname:
                     continue
-                expk = float(pstat["k"])
-                line = round(expk - 0.5) + 0.5 if expk >= 1 else 0.5   # nearest half line
+                expk, exph = float(pstat["k"]), float(pstat["h"])
+                k_line = round(expk - 0.5) + 0.5 if expk >= 1 else 0.5   # nearest half line
+                h_line = round(exph - 0.5) + 0.5 if exph >= 1 else 0.5
                 prows.append({
                     "Pitcher": pname,
-                    "Exp Ks": f"{expk:.1f}",
-                    "Line": f"{line:.1f}",
-                    "Over %": f"{poisson_sf(int(line), expk)*100:.0f}%",
+                    "Exp Ks": f"{expk:.1f}", "K line": f"{k_line:.1f}",
+                    "K Over %": f"{poisson_sf(int(k_line), expk)*100:.0f}%",
+                    "Exp Hits": f"{exph:.1f}", "Hits line": f"{h_line:.1f}",
+                    "Hits Over %": f"{poisson_sf(int(h_line), exph)*100:.0f}%",
                 })
             if prows:
                 st.table(pd.DataFrame(prows).set_index("Pitcher"))

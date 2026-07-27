@@ -110,6 +110,7 @@ def run_backtest(sims, max_games, start, end, half_life=150):
         train = app.add_recency_weights(train, D, half_life)   # weight recent form higher (as of game date)
         league = app._compute_league_baselines(train)
         bullpens = app.compute_bullpen_profiles(train, league)   # per-team relief quality as of D
+        stamina = app.compute_pitcher_stamina(train)             # per-starter workload as of D
         for gid in by_date[D]:
             g = pa[pa["game_pk"] == gid]
             info = reconstruct_game(g)
@@ -121,7 +122,8 @@ def run_backtest(sims, max_games, start, end, half_life=150):
                 info["away_sp"], info["home_sp"],
                 park, NEUTRAL_WEATHER, league, train, simulations=sims,
                 away_bullpen=bullpens.get(info["away_abbr"]),
-                home_bullpen=bullpens.get(info["home_abbr"]))
+                home_bullpen=bullpens.get(info["home_abbr"]),
+                stamina=stamina)
 
             actual_total = info["final_away"] + info["final_home"]
             home_won = 1 if info["final_home"] > info["final_away"] else 0

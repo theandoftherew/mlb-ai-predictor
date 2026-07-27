@@ -57,13 +57,14 @@ def _grade(pred_home_wp, pred_total, pred_margin, a_away, a_home):
 
 
 def _predict_one(away_lineup, home_lineup, away_sp, home_sp, home_abbr, away_abbr,
-                 pa, league, bullpens, sims):
+                 pa, league, bullpens, sims, stamina=None):
     park = app.PARK_FACTORS.get(backtest.ABBR_TO_TEAM.get(home_abbr, ""), app.NEUTRAL_PARK)
     _, _, bet = app.simulate_games(
         away_lineup, home_lineup, away_sp, home_sp, park,
         {"temp": 70, "wind_mph": 5, "wind_dir": "Neutral"},
         league, pa, simulations=sims,
-        away_bullpen=bullpens.get(away_abbr), home_bullpen=bullpens.get(home_abbr))
+        away_bullpen=bullpens.get(away_abbr), home_bullpen=bullpens.get(home_abbr),
+        stamina=stamina)
     return bet
 
 
@@ -105,13 +106,14 @@ def seed(start, end, sims, max_games):
         train = app.add_recency_weights(train, D)
         league = app._compute_league_baselines(train)
         bullpens = app.compute_bullpen_profiles(train, league)
+        stamina = app.compute_pitcher_stamina(train)
         for gid in by_date[D]:
             info = backtest.reconstruct_game(pa[pa["game_pk"] == gid])
             if info is None:
                 continue
             bet = _predict_one(info["away_lineup"], info["home_lineup"], info["away_sp"],
                                info["home_sp"], info["home_abbr"], info["away_abbr"],
-                               train, league, bullpens, sims)
+                               train, league, bullpens, sims, stamina)
             g = _grade(bet["home_win_pct"], bet["avg_total_runs"],
                        bet["away_exp_runs"] - bet["home_exp_runs"],
                        info["final_away"], info["final_home"])
@@ -135,6 +137,7 @@ def predict(day):
     pa_w = app.add_recency_weights(pa, day)
     league = app._compute_league_baselines(pa_w)
     bullpens = app.compute_bullpen_profiles(pa_w, league)
+    stamina = app.compute_pitcher_stamina(pa_w)
 
     games = app.get_games_for_date(day)
     log = _load_log()
@@ -148,7 +151,7 @@ def predict(day):
                            cards["away_pitcher"], cards["home_pitcher"],
                            app.TEAM_NAME_TO_ABBR.get(g["home_team_name"]),
                            app.TEAM_NAME_TO_ABBR.get(g["away_team_name"]),
-                           pa_w, league, bullpens, 800)
+                           pa_w, league, bullpens, 800, stamina)
         new.append({
             "pred_date": day, "game_pk": int(g["id"]),
             "away_team": app.TEAM_NAME_TO_ABBR.get(g["away_team_name"]),
