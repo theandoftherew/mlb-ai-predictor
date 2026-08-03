@@ -314,6 +314,9 @@ def compute_bullpen_profiles(pa, league):
     # The pitching team is the HOME team in the top of the inning, else the away team.
     relief['_team'] = np.where(relief['inning_topbot'] == 'Top',
                                relief['home_team'], relief['away_team'])
+    # NOTE: a leverage-based "high-leverage bullpen" (closer/setup rates in the
+    # 8th/9th of close games) was tested here and REJECTED — the small sample added
+    # more noise than signal (Brier 0.2453 -> 0.2492 in an A/B). See project notes.
     profiles = {}
     for team, m in relief.groupby('_team'):
         split = {s: _shrink_rates(_rates(m[m['stand'] == s]), league["by_stand"][s])
@@ -659,15 +662,23 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
         outs_added = 0
         runs = 0
 
+        # Each base holds the pitcher RESPONSIBLE for that runner (or falsy if empty),
+        # so an inherited runner who scores is charged to the pitcher who allowed him,
+        # not the reliever on the mound. A scoring runner: runs += 1 and that runner's
+        # responsible pitcher gets the earned run.
         if roll < prob_bb + prob_hbp:            # WALK or HIT-BY-PITCH (force advance)
             if roll < prob_bb:                   # (HBP doesn't count as a walk stat)
                 batting[batter_name]["bb"] += 1
                 pitching[pit_name]["bb"] += 1
-            if b1 and b2 and b3:
-                runs += 1
-            elif b1 and b2: b3 = 1
-            elif b1: b2 = 1
-            else: b1 = 1
+            if b1 and b2 and b3:                 # bases loaded: runner on 3rd forced home
+                runs += 1; pitching[b3]["er"] += 1
+                b1, b2, b3 = pit_name, b1, b2
+            elif b1 and b2:
+                b1, b2, b3 = pit_name, b1, b2
+            elif b1:
+                b1, b2 = pit_name, b1
+            else:
+                b1 = pit_name
         elif roll < prob_bb + prob_hbp + prob_k: # STRIKEOUT
             outs_added = 1
             batting[batter_name]["ab"] += 1
@@ -683,51 +694,53 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
                 t = random.random()
                 if t < hr_r:                     # HOME RUN
                     batting[batter_name]["hr"] += 1
-                    runs += b1 + b2 + b3 + 1
+                    for r in (b1, b2, b3):
+                        if r: runs += 1; pitching[r]["er"] += 1
+                    runs += 1; pitching[pit_name]["er"] += 1   # the batter himself
                     b1 = b2 = b3 = 0
                 elif t < hr_r + bp["triple"]:    # TRIPLE
                     batting[batter_name]["triple"] += 1
-                    runs += b1 + b2 + b3
-                    b1, b2, b3 = 0, 0, 1
+                    for r in (b1, b2, b3):
+                        if r: runs += 1; pitching[r]["er"] += 1
+                    b1, b2, b3 = 0, 0, pit_name
                 elif t < hr_r + bp["triple"] + bp["double"]:  # DOUBLE
                     batting[batter_name]["double"] += 1
-                    runs += b2 + b3                       # runners on 2nd & 3rd score
+                    if b2: runs += 1; pitching[b2]["er"] += 1
+                    if b3: runs += 1; pitching[b3]["er"] += 1
                     new3 = 0
                     if b1:
                         if random.random() < 0.47:        # runner from 1st scores ~47%
-                            runs += 1
+                            runs += 1; pitching[b1]["er"] += 1
                         else:
-                            new3 = 1                       # else holds at 3rd
-                    b1, b2, b3 = 0, 1, new3               # batter to 2nd
+                            new3 = b1                      # else holds at 3rd
+                    b1, b2, b3 = 0, pit_name, new3        # batter to 2nd
                 else:                            # SINGLE
-                    scored = b3                           # runner on 3rd scores
+                    if b3: runs += 1; pitching[b3]["er"] += 1   # runner on 3rd scores
                     new3 = 0
                     if b2:
                         if random.random() < 0.62:        # runner from 2nd scores ~62%
-                            scored += 1
+                            runs += 1; pitching[b2]["er"] += 1
                         else:
-                            new3 = 1                       # else holds at 3rd
+                            new3 = b2                      # else holds at 3rd
                     new2 = 0
                     if b1:
-                        if random.random() < 0.25 and new3 == 0:
-                            new3 = 1                       # first-to-third
+                        if random.random() < 0.25 and not new3:
+                            new3 = b1                      # first-to-third
                         else:
-                            new2 = 1                       # else to second
-                    runs += scored
-                    b1, b2, b3 = 1, new2, new3            # batter to first
+                            new2 = b1                      # else to second
+                    b1, b2, b3 = pit_name, new2, new3     # batter to first
             else:                                # BALL IN PLAY, NOT A HIT
                 if random.random() < 0.020:      # REACHED ON ERROR — not an out
-                    runs += b3                           # runner on 3rd scores
-                    b1, b2, b3 = 1, b1, b2               # everyone advances one base
+                    if b3: runs += 1; pitching[b3]["er"] += 1   # runner on 3rd scores
+                    b1, b2, b3 = pit_name, b1, b2         # everyone advances one base
                 else:                            # OUT ON CONTACT
                     outs_added = 1
                     # Sac fly / productive out: runner on 3rd scores with < 2 outs.
                     if b3 and outs < 2 and random.random() < 0.24:
-                        runs += 1
+                        runs += 1; pitching[b3]["er"] += 1
                         b3 = 0
 
         batting[batter_name]["rbi"] += runs
-        pitching[pit_name]["er"] += runs
         return outs_added, runs, (b1, b2, b3)
 
     for _ in range(simulations):
