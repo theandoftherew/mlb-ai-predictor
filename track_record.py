@@ -57,7 +57,7 @@ def _grade(pred_home_wp, pred_total, pred_margin, a_away, a_home):
 
 
 def _predict_one(away_lineup, home_lineup, away_sp, home_sp, home_abbr, away_abbr,
-                 pa, league, bullpens, sims, stamina=None):
+                 pa, league, bullpens, sims, stamina=None, model=None):
     park = app.PARK_FACTORS.get(backtest.ABBR_TO_TEAM.get(home_abbr, ""), app.NEUTRAL_PARK)
     _, _, bet = app.simulate_games(
         away_lineup, home_lineup, away_sp, home_sp, park,
@@ -65,6 +65,10 @@ def _predict_one(away_lineup, home_lineup, away_sp, home_sp, home_abbr, away_abb
         league, pa, simulations=sims,
         away_bullpen=bullpens.get(away_abbr), home_bullpen=bullpens.get(home_abbr),
         stamina=stamina)
+    if model is not None:   # live prediction: blend with ML (future games, no leakage)
+        feats = app.compute_ml_features(away_lineup, home_lineup, away_sp, home_sp, park,
+                                        pa, league, bullpens, stamina, away_abbr, home_abbr)
+        app.blend_win_prob(bet, model, feats)
     return bet
 
 
@@ -138,6 +142,7 @@ def predict(day):
     league = app._compute_league_baselines(pa_w)
     bullpens = app.compute_bullpen_profiles(pa_w, league)
     stamina = app.compute_pitcher_stamina(pa_w)
+    model = app.load_ml_model()             # blend live predictions with ML
 
     games = app.get_games_for_date(day)
     log = _load_log()
@@ -151,7 +156,7 @@ def predict(day):
                            cards["away_pitcher"], cards["home_pitcher"],
                            app.TEAM_NAME_TO_ABBR.get(g["home_team_name"]),
                            app.TEAM_NAME_TO_ABBR.get(g["away_team_name"]),
-                           pa_w, league, bullpens, 800, stamina)
+                           pa_w, league, bullpens, 800, stamina, model)
         new.append({
             "pred_date": day, "game_pk": int(g["id"]),
             "away_team": app.TEAM_NAME_TO_ABBR.get(g["away_team_name"]),

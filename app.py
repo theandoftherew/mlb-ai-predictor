@@ -18,7 +18,7 @@ import altair as alt
 
 # Bump this whenever the model's math/weights change, so the performance log can
 # compare versions on their real, realized results.
-MODEL_VERSION = "v1.3-tto"
+MODEL_VERSION = "v1.4-mlblend"
 
 # Home-field advantage: home hitters get a small offensive boost, away hitters a
 # small penalty. Real MLB home teams win ~54%; without this the model under-rates
@@ -347,6 +347,86 @@ def compute_pitcher_stamina(pa):
 # NOTE: Team DEFENSE (xBA-based fielding factors) was tested here and REMOVED —
 # a 300-game backtest showed no improvement once properly centered (pitcher rates
 # already encode a team's defense, so it mostly double-counted). See project notes.
+
+
+# =====================================================================
+# 1b. ML FEATURES (shared by ml_dataset.py training + the live blend, so the
+# model always sees features computed the exact same way — no train/serve skew)
+# =====================================================================
+ML_RAW_FEATURES = [
+    "home_off_k", "home_off_bb", "home_off_chit", "home_off_hr",
+    "away_off_k", "away_off_bb", "away_off_chit", "away_off_hr",
+    "home_sp_k", "home_sp_bb", "home_sp_chit", "home_sp_stam",
+    "away_sp_k", "away_sp_bb", "away_sp_chit", "away_sp_stam",
+    "home_pen_k", "home_pen_bb", "home_pen_chit",
+    "away_pen_k", "away_pen_bb", "away_pen_chit",
+    "park_runs", "park_hr",
+]
+
+
+def _ml_team_off(lineup, pa, league, vs_throws):
+    ks, bbs, chits, hrs = [], [], [], []
+    for rec in lineup:
+        prof = build_batter_profile(pa, rec["id"], rec["bats"], league)
+        r = prof["split"][vs_throws]
+        ks.append(r["k"]); bbs.append(r["bb"]); chits.append(r["chit"]); hrs.append(prof["hr"])
+    return np.mean(ks), np.mean(bbs), np.mean(chits), np.mean(hrs)
+
+
+def _ml_pitcher(pid, throws, pa, league, stamina):
+    prof = build_pitcher_profile(pa, pid, throws, league)
+    k = (prof["split"]["L"]["k"] + prof["split"]["R"]["k"]) / 2
+    bb = (prof["split"]["L"]["bb"] + prof["split"]["R"]["bb"]) / 2
+    chit = (prof["split"]["L"]["chit"] + prof["split"]["R"]["chit"]) / 2
+    return k, bb, chit, (stamina or {}).get(pid, DEFAULT_STAMINA)
+
+
+def _ml_pen(pen):
+    if not pen:
+        return np.nan, np.nan, np.nan
+    k = (pen["split"]["L"]["k"] + pen["split"]["R"]["k"]) / 2
+    bb = (pen["split"]["L"]["bb"] + pen["split"]["R"]["bb"]) / 2
+    chit = (pen["split"]["L"]["chit"] + pen["split"]["R"]["chit"]) / 2
+    return k, bb, chit
+
+
+def compute_ml_features(away, home, away_p, home_p, park, pa, league, bullpens,
+                        stamina, away_abbr=None, home_abbr=None):
+    """Feature dict (ML_RAW_FEATURES order) for one matchup — same computation the
+    model was trained on."""
+    ho = _ml_team_off(home, pa, league, away_p["throws"])
+    ao = _ml_team_off(away, pa, league, home_p["throws"])
+    hpf = _ml_pitcher(home_p["id"], home_p["throws"], pa, league, stamina)
+    apf = _ml_pitcher(away_p["id"], away_p["throws"], pa, league, stamina)
+    hpen = _ml_pen((bullpens or {}).get(home_abbr))
+    apen = _ml_pen((bullpens or {}).get(away_abbr))
+    vals = [*ho, *ao, *hpf, *apf, *hpen, *apen, park["runs"], park["hr"]]
+    return dict(zip(ML_RAW_FEATURES, vals))
+
+
+def load_ml_model(path="ml_model.pkl"):
+    """Load the saved logistic model (returns None if missing/unloadable)."""
+    try:
+        import pickle
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        return None
+
+
+def blend_win_prob(betting, model, features):
+    """Blend the sim's home win% 50/50 with the ML model's, in-place. No-op if the
+    model is missing or any feature is NaN."""
+    if model is None:
+        return betting
+    x = np.array([[features[f] for f in ML_RAW_FEATURES]], dtype=float)
+    if np.isnan(x).any():
+        return betting
+    ml_home = float(model.predict_proba(x)[0, 1])
+    blended = 0.5 * betting["home_win_pct"] + 0.5 * ml_home
+    betting["home_win_pct"] = blended
+    betting["away_win_pct"] = 1.0 - blended
+    return betting
 
 
 # =====================================================================
@@ -944,8 +1024,10 @@ def main():
     if "stamina" not in st.session_state:                  # compute once per session (fast reruns)
         st.session_state.bullpens = compute_bullpen_profiles(pa_df, league)
         st.session_state.stamina = compute_pitcher_stamina(pa_df)
+        st.session_state.ml_model = load_ml_model()        # ML blend model (None if absent)
     bullpens = st.session_state.bullpens
     stamina = st.session_state.stamina
+    ml_model = st.session_state.ml_model
 
     data_through = pd.to_datetime(pa_df["game_date"], errors="coerce").max()
     data_through_str = data_through.strftime("%B %-d, %Y") if pd.notna(data_through) else "unknown"
@@ -1030,6 +1112,11 @@ when it says 60%, that side wins about 60% of the time.
                         league, pa_df, simulations=400,
                         away_bullpen=bullpens.get(aabbr), home_bullpen=bullpens.get(habbr),
                         stamina=stamina)
+                    if ml_model is not None:
+                        blend_win_prob(bet, ml_model, compute_ml_features(
+                            cards["away_lineup"], cards["home_lineup"], cards["away_pitcher"],
+                            cards["home_pitcher"], PARK_FACTORS.get(g["home_team_name"], NEUTRAL_PARK),
+                            pa_df, league, bullpens, stamina, aabbr, habbr))
                     fav = (g["away_team_name"] if bet["away_win_pct"] > bet["home_win_pct"]
                            else g["home_team_name"])
                     slate_rows.append({
@@ -1212,6 +1299,13 @@ when it says 60%, that side wins about 60% of the time.
             st.error(f"😕 Something went wrong running the simulation. Try reselecting the game "
                      f"or reloading lineups.\n\n`{type(e).__name__}: {e}`")
             st.stop()
+
+        # Blend the simulation's win% 50/50 with the ML model (validated: beats either alone).
+        if ml_model is not None:
+            feats = compute_ml_features(
+                away_recs, home_recs, st.session_state.away_p, st.session_state.home_p,
+                park, pa_df, league, bullpens, stamina, away_abbr, home_abbr)
+            blend_win_prob(betting, ml_model, feats)
 
         st.markdown("## 💰 Betting & Market Metrics")
         away_ml = prob_to_odds(betting['away_win_pct'], odds_fmt)
