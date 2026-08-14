@@ -252,6 +252,22 @@ def _compute_league_baselines(pa):
 RATE_SMOOTH = 120.0     # PAs of "league prior" mixed into rate splits
 HITTYPE_SMOOTH = 60.0   # hits of "league prior" mixed into hit-type mix
 
+# Two-level (hierarchical) shrinkage for a PITCHER's L/R platoon splits. Splitting
+# by batter hand halves the sample, so a thin split gets yanked all the way to
+# league — which flattens aces toward average (the backtest's K-reliability curve
+# showed exactly this compression). Instead, regress each split toward the
+# pitcher's OWN overall rate (itself regressed to league), shaped by the league's
+# platoon delta. Same data, allocated by partial pooling — no new signal, so it
+# can't double-count. Toggle for clean A/B testing.
+#
+# A/B RESULT (2026-08, two 140-game/~270-start walk-forward windows, common random
+# numbers): win Brier NEUTRAL (Δ +0.0026 then -0.0038, both within noise); K-prop
+# reliability improved sharply in Jun/Jul (bucketed error 0.40->0.17) but did NOT
+# replicate in May (0.36->0.44, window-wide K over-projection dominated). Not a
+# robustly demonstrated improvement -> kept OFF by default. Do not re-adopt without
+# a new angle or a multi-window replication.
+HIER_SHRINK = False
+
 
 def _shrink_rates(sub, prior):
     if sub is None:
@@ -286,6 +302,17 @@ def build_batter_profile(pa, batter_id, bats, league):
     return {"bats": bats or 'R', "split": split, **ht}
 
 
+def _platoon_prior(own, lg_stand, lg_overall):
+    """Prior for a pitcher's vs-LHB/vs-RHB split: his OWN overall rate scaled by the
+    league's platoon shape for that batter side (multiplicative, so the league L/R
+    tendency is kept), clipped to a sane range."""
+    out = {}
+    for key in ("bb", "k", "chit"):
+        ratio = lg_stand[key] / lg_overall[key] if lg_overall[key] > 0 else 1.0
+        out[key] = float(min(0.95, max(0.001, own[key] * ratio)))
+    return out
+
+
 def build_pitcher_profile(pa, pitcher_id, throws, league, is_bullpen=False):
     """Pitcher profile with splits vs LHB/RHB. Bullpen (or unknown) pitchers
     default to league-average, i.e. matchup driven purely by the batter."""
@@ -296,8 +323,15 @@ def build_pitcher_profile(pa, pitcher_id, throws, league, is_bullpen=False):
         return {"throws": throws or 'R', "split": split, "is_pen": is_bullpen}
     m = pa[pa['pitcher'] == pitcher_id]
     split = {}
-    for s in ['L', 'R']:  # vs LHB / vs RHB
-        split[s] = _shrink_rates(_rates(m[m['stand'] == s]), league["by_stand"][s])
+    if HIER_SHRINK:
+        # Level 1: the pitcher's own overall rate, regressed to league overall.
+        own = _shrink_rates(_rates(m), league["overall_rates"])
+        for s in ['L', 'R']:  # Level 2: split regressed to (own level x league platoon shape)
+            prior = _platoon_prior(own, league["by_stand"][s], league["overall_rates"])
+            split[s] = _shrink_rates(_rates(m[m['stand'] == s]), prior)
+    else:
+        for s in ['L', 'R']:  # vs LHB / vs RHB — original: split regressed straight to league
+            split[s] = _shrink_rates(_rates(m[m['stand'] == s]), league["by_stand"][s])
     return {"throws": throws or 'R', "split": split, "is_pen": is_bullpen}
 
 
@@ -494,6 +528,15 @@ def get_game_lineups(game):
             for bid in order:
                 person = box[side]["players"][f"ID{bid}"]["person"]
                 lineups[f"{side}_lineup"].append({"name": person["fullName"], "id": person["id"], "bats": "R"})
+            # If the schedule API didn't post a probable pitcher, fall back to the
+            # boxscore's starter (first pitcher listed = first to appear). Without an
+            # id the sim silently uses a league-average starter (~4.5 K for everyone).
+            if not lineups[f"{side}_pitcher"].get("id"):
+                pids = box[side].get("pitchers", [])
+                if pids:
+                    sp = box[side]["players"][f"ID{pids[0]}"]["person"]
+                    lineups[f"{side}_pitcher"]["id"] = sp["id"]
+                    lineups[f"{side}_pitcher"]["name"] = sp["fullName"]
     except Exception:
         pass
 
@@ -543,9 +586,10 @@ def get_weather(game_id):
 
 
 def get_team_roster(team_id):
-    """Full active roster for a team: {full_name: {id, bats, is_pitcher}}. Used to
-    populate the lineup dropdowns so swapping a hitter loads the RIGHT player's
-    stats + handedness automatically."""
+    """Full active roster for a team: {full_name: {id, bats, throws, is_pitcher}}.
+    Used to populate the lineup dropdowns AND to resolve a typed starting-pitcher
+    name back to the RIGHT MLBAM id + handedness (so the sim uses that pitcher's
+    real stats instead of a silent league-average fallback)."""
     try:
         url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster?rosterType=active"
         roster = requests.get(url, timeout=15).json()["roster"]
@@ -556,6 +600,7 @@ def get_team_roster(team_id):
             out[p["person"]["fullName"]] = {
                 "id": pid,
                 "bats": hand.get(pid, {}).get("bats", "R"),
+                "throws": hand.get(pid, {}).get("throws", "R"),
                 "is_pitcher": p["position"]["type"] == "Pitcher",
             }
         return out
@@ -1025,9 +1070,14 @@ def main():
         st.session_state.bullpens = compute_bullpen_profiles(pa_df, league)
         st.session_state.stamina = compute_pitcher_stamina(pa_df)
         st.session_state.ml_model = load_ml_model()        # ML blend model (None if absent)
+        # Every pitcher we have real rates for. A starter whose id isn't here gets a
+        # silent league-average profile — we warn instead of quietly under-projecting.
+        st.session_state.known_pitchers = set(pd.to_numeric(pa_df["pitcher"],
+                                                            errors="coerce").dropna().unique())
     bullpens = st.session_state.bullpens
     stamina = st.session_state.stamina
     ml_model = st.session_state.ml_model
+    known_pitchers = st.session_state.known_pitchers
 
     data_through = pd.to_datetime(pa_df["game_date"], errors="coerce").max()
     data_through_str = data_through.strftime("%B %-d, %Y") if pd.notna(data_through) else "unknown"
@@ -1207,13 +1257,23 @@ when it says 60%, that side wins about 60% of the time.
     c1, c2 = st.columns(2)
     with c1:
         st.markdown(f"### 🚀 {chosen['away_team_name']} (Away)")
-        st.session_state.away_p["name"] = st.text_input("Away SP", st.session_state.away_p["name"], key=f"ap_{chosen['id']}")
+        _an = st.text_input("Away SP", st.session_state.away_p["name"], key=f"ap_{chosen['id']}")
+        st.session_state.away_p["name"] = _an
+        _ainfo = st.session_state.away_roster.get(_an.strip())   # match name -> real id/hand
+        if _ainfo and _ainfo.get("is_pitcher"):
+            st.session_state.away_p["id"] = _ainfo["id"]
+            st.session_state.away_p["throws"] = _ainfo.get("throws", st.session_state.away_p["throws"])
         st.session_state.away_p["throws"] = st.selectbox("Throws", ["R", "L"],
             index=0 if st.session_state.away_p["throws"] == "R" else 1, key=f"apt_{chosen['id']}")
         render_lineup("aord", st.session_state.away_roster, st.session_state.away_df, chosen['id'])
     with c2:
         st.markdown(f"### 🏠 {chosen['home_team_name']} (Home)")
-        st.session_state.home_p["name"] = st.text_input("Home SP", st.session_state.home_p["name"], key=f"hp_{chosen['id']}")
+        _hn = st.text_input("Home SP", st.session_state.home_p["name"], key=f"hp_{chosen['id']}")
+        st.session_state.home_p["name"] = _hn
+        _hinfo = st.session_state.home_roster.get(_hn.strip())   # match name -> real id/hand
+        if _hinfo and _hinfo.get("is_pitcher"):
+            st.session_state.home_p["id"] = _hinfo["id"]
+            st.session_state.home_p["throws"] = _hinfo.get("throws", st.session_state.home_p["throws"])
         st.session_state.home_p["throws"] = st.selectbox("Throws", ["R", "L"],
             index=0 if st.session_state.home_p["throws"] == "R" else 1, key=f"hpt_{chosen['id']}")
         render_lineup("hord", st.session_state.home_roster, st.session_state.home_df, chosen['id'])
@@ -1285,6 +1345,20 @@ when it says 60%, that side wins about 60% of the time.
             st.stop()
         if len(away_recs) < 9 or len(home_recs) < 9:
             st.info("ℹ️ A lineup has fewer than 9 batters — simulating with what's entered.")
+
+        # A starter whose id isn't in our data gets a league-average profile — which
+        # flattens EVERY unresolved starter to ~4.5 projected Ks (an ace's line looks
+        # far too low, an average arm's looks fine). Surface it instead of hiding it.
+        def _unresolved_sp(p):
+            pid = p.get("id")
+            return pid is None or pid not in known_pitchers
+        generic = [p["name"] for p in (st.session_state.away_p, st.session_state.home_p)
+                   if _unresolved_sp(p)]
+        if generic:
+            st.warning("⚠️ No stats found for **" + "**, **".join(generic) + "** — "
+                       "simulating them as a *league-average* starter, so their strikeout "
+                       "and ERA projections are generic (not this pitcher). Pick the starter "
+                       "from the team roster, or refresh once the lineup is posted.")
 
         away_abbr = TEAM_NAME_TO_ABBR.get(chosen["away_team_name"])
         home_abbr = TEAM_NAME_TO_ABBR.get(chosen["home_team_name"])

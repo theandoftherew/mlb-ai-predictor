@@ -39,6 +39,38 @@ ABBR_TO_TEAM = {
 }
 NEUTRAL_WEATHER = {"temp": 70, "wind_mph": 5, "wind_dir": "Neutral"}
 
+# Map a PA `events` value -> outs it records, so we can reconstruct a starter's
+# actual IP from his own PA rows (the slim CSV has no outs column). Approximate but
+# unbiased in aggregate: anything not listed (walk/hit/HBP/error) records 0 outs.
+OUT_MAP = {
+    "strikeout": 1, "field_out": 1, "force_out": 1, "sac_fly": 1, "sac_bunt": 1,
+    "fielders_choice_out": 1, "fielders_choice": 1, "other_out": 1, "caught_stealing_2b": 1,
+    "grounded_into_double_play": 2, "double_play": 2, "strikeout_double_play": 2,
+    "sac_fly_double_play": 2, "triple_play": 3,
+}
+
+
+def ip_str_to_float(s):
+    """Sim IP notation '5.2' (5 & 2/3) -> 5.667."""
+    whole, rem = s.split(".")
+    return int(whole) + int(rem) / 3.0
+
+
+def starter_actuals(g, pid):
+    """What the starter actually did in this game, from his own PA rows:
+    batters faced, strikeouts, hits allowed, and (approx) innings pitched.
+    Returns None if he has no PAs in the game."""
+    gp = g[g["pitcher"] == pid]
+    if len(gp) == 0:
+        return None
+    outs = int(gp["events"].map(OUT_MAP).fillna(0).sum())
+    return {
+        "bf": len(gp),
+        "k": int((gp["events"] == "strikeout").sum()),
+        "h": int(gp["events"].isin(app.HIT_EVENTS).sum()),
+        "ip": outs / 3.0,
+    }
+
 
 def reconstruct_game(g):
     """From one game's PA rows, derive lineups, starters, and the final score.
@@ -102,6 +134,7 @@ def run_backtest(sims, max_games, start, end, half_life=150):
         by_date.setdefault(gid_date[gid], []).append(gid)
 
     rows = []
+    prop_rows = []                 # per-starter projected-vs-actual K / IP / hits
     done = 0
     for D in sorted(by_date):
         train = pa[pa["game_date"] < D]
@@ -117,13 +150,27 @@ def run_backtest(sims, max_games, start, end, half_life=150):
             if info is None:
                 continue
             park = app.PARK_FACTORS.get(ABBR_TO_TEAM.get(info["home_abbr"], ""), app.NEUTRAL_PARK)
-            _, _, betting = app.simulate_games(
+            _, pitchers, betting = app.simulate_games(
                 info["away_lineup"], info["home_lineup"],
                 info["away_sp"], info["home_sp"],
                 park, NEUTRAL_WEATHER, league, train, simulations=sims,
                 away_bullpen=bullpens.get(info["away_abbr"]),
                 home_bullpen=bullpens.get(info["home_abbr"]),
                 stamina=stamina)
+
+            # --- Starter prop grading (K / IP / hits allowed), both starters ---
+            for sp in (info["home_sp"], info["away_sp"]):
+                act = starter_actuals(g, sp["id"])
+                proj = pitchers.get(sp["name"])
+                if act is None or proj is None:
+                    continue
+                if act["bf"] < 5 or act["ip"] < 1:      # skip openers / injury exits
+                    continue
+                prop_rows.append({
+                    "p_ip": ip_str_to_float(proj["ip"]), "a_ip": act["ip"],
+                    "p_k":  float(proj["k"]),            "a_k":  act["k"],
+                    "p_h":  float(proj["h"]),            "a_h":  act["h"],
+                })
 
             actual_total = info["final_away"] + info["final_home"]
             home_won = 1 if info["final_home"] > info["final_away"] else 0
@@ -140,7 +187,9 @@ def run_backtest(sims, max_games, start, end, half_life=150):
 
     if not rows:
         print("No games could be evaluated in that window."); return None
-    return report(pd.DataFrame(rows), sims)
+    res = report(pd.DataFrame(rows), sims)
+    res["props"] = report_props(pd.DataFrame(prop_rows))
+    return res
 
 
 def report(df, sims):
@@ -191,6 +240,50 @@ def report(df, sims):
     print("=" * 60)
     return {"n": n, "acc": acc, "brier": brier, "logloss": logloss,
             "mae": mae, "rmse": rmse, "bias": bias}
+
+
+def report_props(d):
+    """Grade starter props (strikeouts, IP, hits allowed) projected-vs-actual.
+    This is the number that was MISSING: the win/total report can look healthy
+    while props are systematically off (e.g. an unresolved pitcher projecting a
+    generic ~4.5 K). Reports aggregate bias plus a K reliability curve."""
+    if d is None or len(d) == 0:
+        print("\n  (no starter props graded)"); return None
+    n = len(d)
+
+    def line(tag, p, a, unit=""):
+        bias = float((p - a).mean()); mae = float((p - a).abs().mean())
+        print(f"   {tag:14s} proj {p.mean():5.2f}   actual {a.mean():5.2f}   "
+              f"bias {bias:+.2f}   MAE {mae:4.2f}{unit}")
+        return {"proj": float(p.mean()), "actual": float(a.mean()), "bias": bias, "mae": mae}
+
+    print("\n" + "=" * 60)
+    print(f"  STARTER PROP REPORT  ({n} starts graded)")
+    print("=" * 60)
+    k = line("Strikeouts", d["p_k"], d["a_k"])
+    ip = line("Innings",    d["p_ip"], d["a_ip"])
+    h = line("Hits allowed", d["p_h"], d["a_h"])
+    # K/9 pooled (rate, independent of volume) — separates a rate miss from a volume miss.
+    pk9 = float(d["p_k"].sum() / d["p_ip"].sum() * 9)
+    ak9 = float(d["a_k"].sum() / d["a_ip"].sum() * 9)
+    print(f"\n   K/9 (pooled) proj {pk9:5.2f}   actual {ak9:5.2f}   "
+          f"ratio {pk9/ak9:.2f}   ({'rate high' if pk9>ak9 else 'rate low'})")
+
+    # Reliability: bucket by PROJECTED K, show mean actual K per bucket. If the
+    # projections are honest, actual tracks projected down the column.
+    print("\n  ── K RELIABILITY (is a 7-K projection really ~7 K?) ──")
+    print("   proj-K bucket    n   mean proj   mean actual")
+    bins = [0, 4, 5, 6, 7, 99]; labels = ["<4", "4-5", "5-6", "6-7", "7+"]
+    d = d.copy(); d["bucket"] = pd.cut(d["p_k"], bins=bins, labels=labels, right=False)
+    for lab in labels:
+        b = d[d["bucket"] == lab]
+        if len(b):
+            print(f"   {lab:>8}      {len(b):4d}    {b['p_k'].mean():6.2f}      {b['a_k'].mean():6.2f}")
+    print("=" * 60)
+    print("  Read: bias near 0 = props aren't systematically high/low. In each")
+    print("  reliability bucket, mean actual should track mean proj.")
+    print("=" * 60)
+    return {"n": n, "k": k, "ip": ip, "hits": h, "k9_proj": pk9, "k9_actual": ak9}
 
 
 if __name__ == "__main__":
