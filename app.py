@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import os
 import random
 import requests
 from datetime import datetime
@@ -968,7 +969,24 @@ def simulate_games(away, home, away_p, home_p, park, weather, league, pa, simula
 # The app uses these (fast, cached). backtest.py / ML code import the plain
 # underscore-prefixed versions above so they run without a Streamlit runtime.
 # =====================================================================
-load_data = st.cache_data(_load_data)
+DATA_FILE = "mlb_batting_data.csv"
+
+
+@st.cache_data
+def _load_data_cached(sig):
+    """`sig` is the data file's mtime and IS part of the cache key (no leading
+    underscore, so Streamlit hashes it) — a changed mtime busts the cache, so a
+    refreshed CSV always shows up without a code change or manual reboot. On
+    Streamlit Community Cloud a redeploy re-clones the file, changing mtime, which
+    reloads it automatically."""
+    return _load_data()
+
+
+def load_data():
+    sig = os.path.getmtime(DATA_FILE) if os.path.exists(DATA_FILE) else 0.0
+    return _load_data_cached(sig)
+
+
 compute_league_baselines = st.cache_data(_compute_league_baselines)
 
 
