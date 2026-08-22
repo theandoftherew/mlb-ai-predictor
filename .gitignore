@@ -2,6 +2,9 @@
 # The app runs on the slim mlb_batting_data.csv (23 MB), which IS committed.
 mlb_batting_data_full.csv
 
+# Backup written by refresh_data.py before it appends — local safety net only.
+*.bak
+
 # Python
 __pycache__/
 *.pyc
