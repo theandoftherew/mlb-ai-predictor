@@ -1118,7 +1118,7 @@ pred_date,game_pk,away_team,home_team,model_version,pred_home_win_pct,pred_total
 2026-08-28,823178,AZ,SF,v1.4-mlblend,0.4293,7.55,-0.11,settled,10.0,6.0,0.0,1.0,0.1843,8.45,4.11
 2026-08-29,823539,BOS,NYY,v1.4-mlblend,0.6064,7.31,-0.72,open,,,,,,,
 2026-08-29,823501,BOS,NYY,v1.4-mlblend,0.6248,7.79,-0.56,open,,,,,,,
-2026-08-29,824230,LAD,DET,v1.4-mlblend,0.5126,7.24,-0.88,open,,,,,,,
+2026-08-29,824230,LAD,DET,v1.4-mlblend,0.5126,7.24,-0.88,settled,1.0,2.0,1.0,1.0,0.2376,4.24,0.12
 2026-08-29,823665,CWS,MIN,v1.4-mlblend,0.6112,8.86,-1.07,open,,,,,,,
 2026-08-29,823011,PIT,STL,v1.4-mlblend,0.4791,8.05,0.05,open,,,,,,,
 2026-08-29,824637,CIN,CHC,v1.4-mlblend,0.6023,8.76,-0.69,open,,,,,,,
