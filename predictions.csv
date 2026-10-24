@@ -1555,4 +1555,5 @@ pred_date,game_pk,away_team,home_team,model_version,pred_home_win_pct,pred_total
 2026-10-16,849817,TB,CLE,v1.4-mlblend,0.4842,7.86,0.23,open,,,,,,,
 2026-10-17,849816,TB,CLE,v1.4-mlblend,0.4641,7.7,0.05,settled,7.0,3.0,0.0,1.0,0.2154,2.3,3.95
 2026-10-19,849815,CLE,TB,v1.4-mlblend,0.5817,8.14,-0.65,settled,3.0,7.0,1.0,1.0,0.175,1.86,3.35
-2026-10-23,849805,TB,MIL,v1.4-mlblend,0.6025,7.68,-1.57,open,,,,,,,
+2026-10-23,849805,TB,MIL,v1.4-mlblend,0.6025,7.68,-1.57,settled,2.0,3.0,1.0,1.0,0.158,2.68,0.57
+2026-10-24,849802,TB,MIL,v1.4-mlblend,0.4823,7.37,-0.49,open,,,,,,,
